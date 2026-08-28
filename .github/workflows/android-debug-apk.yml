@@ -29,9 +29,48 @@ jobs:
       - name: Build phoneDebug
         run: ./gradlew :app:assemblePhoneDebug --no-daemon
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: haru-piece-phone-debug-apk
           path: app/build/outputs/apk/phone/debug/app-phone-debug.apk
           if-no-files-found: error
+
+      - name: Set up Node.js for Firebase CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Distribute APK to Firebase App Distribution
+        env:
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_TESTER_GROUPS: ${{ vars.FIREBASE_TESTER_GROUPS }}
+          FIREBASE_TESTERS: ${{ vars.FIREBASE_TESTERS }}
+        run: |
+          if [ -z "$FIREBASE_APP_ID" ] || [ -z "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "Firebase App Distribution secrets are not configured. Skipping Firebase distribution."
+            exit 0
+          fi
+
+          SERVICE_ACCOUNT_FILE="$RUNNER_TEMP/firebase-service-account.json"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$SERVICE_ACCOUNT_FILE"
+          export GOOGLE_APPLICATION_CREDENTIALS="$SERVICE_ACCOUNT_FILE"
+
+          RELEASE_NOTES="하루조각 phoneDebug 테스트 빌드
+          Commit: ${GITHUB_SHA}
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          DISTRIBUTION_ARGS=()
+          if [ -n "$FIREBASE_TESTER_GROUPS" ]; then
+            DISTRIBUTION_ARGS+=(--groups "$FIREBASE_TESTER_GROUPS")
+          fi
+          if [ -n "$FIREBASE_TESTERS" ]; then
+            DISTRIBUTION_ARGS+=(--testers "$FIREBASE_TESTERS")
+          fi
+
+          npx --yes firebase-tools@latest appdistribution:distribute \
+            app/build/outputs/apk/phone/debug/app-phone-debug.apk \
+            --app "$FIREBASE_APP_ID" \
+            --release-notes "$RELEASE_NOTES" \
+            "${DISTRIBUTION_ARGS[@]}"
