@@ -17,6 +17,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -61,18 +64,21 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -209,7 +215,8 @@ data class AnswerOption(
 
 data class Question(
     val title: String,
-    val options: List<AnswerOption>
+    val options: List<AnswerOption>,
+    val category: String = ""
 )
 
 @Composable
@@ -374,7 +381,20 @@ fun IntroQuestionScreen(onDone: () -> Unit) {
 
 @Composable
 fun OnboardingShell(title: String, subtitle: String, content: @Composable ColumnScope.() -> Unit) {
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                })
+            },
+        color = MaterialTheme.colorScheme.background
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -526,6 +546,8 @@ fun MainTabs(
 @Composable
 fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (DiaryEntry) -> Unit, onSaveProfile: (Profile) -> Unit, onReset: () -> Unit, onMoveCalendar: () -> Unit) {
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     var mode by remember { mutableStateOf("start") }
     var questionIndex by remember { mutableStateOf(0) }
     val answers = remember { mutableStateListOf<String>() }
@@ -550,14 +572,24 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         entries.size >= 3 -> 2
         else -> 1
     }
-    val localQuestions = buildQuestions(profile, questionLimit, recordDate)
+    val localQuestions = buildQuestions(profile, questionLimit, recordDate, entries)
     val currentQuestion = aiQuestions.getOrNull(questionIndex) ?: localQuestions[questionIndex]
+
+    fun submitCustomAnswer() {
+        val input = customInput.trim()
+        if (input.isBlank()) return
+        val answer = sentenceFromCustomAnswer(input, currentQuestion)
+        handleAnswer(answer, answers, questionIndex, questionLimit, { questionIndex = it }, { draft = it; mode = "review" })
+        customInput = ""
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
 
     LaunchedEffect(mode, questionIndex, recordDate, answers.size) {
         if (mode == "question" && aiQuestions.getOrNull(questionIndex) == null && !aiLoading) {
             aiLoading = true
             val aiQuestion = fetchAiQuestion(profile, entries, recordDate, questionIndex + 1, answers.toList(), questionLimit)
-            if (aiQuestion != null) {
+            if (aiQuestion != null && shouldUseAiQuestion(aiQuestion, entries, recordDate, questionIndex + 1)) {
                 while (aiQuestions.size <= questionIndex) aiQuestions.add(localQuestions[aiQuestions.size])
                 aiQuestions[questionIndex] = aiQuestion
             }
@@ -609,10 +641,15 @@ TestDatePicker(recordDate, { recordDate = it })
                 currentQuestion.options.forEach { option ->
                     OutlinedSoftButton(option.label) { handleAnswer(option.sentence, answers, questionIndex, questionLimit, { questionIndex = it }, { draft = it; mode = "review" }) }
                 }
-                HaruTextField(customInput, { customInput = it }, "기타(입력)")
+                HaruTextField(
+                    value = customInput,
+                    onValueChange = { customInput = it },
+                    label = "기타(입력)",
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { submitCustomAnswer() })
+                )
                 PrimaryButton("기타로 남기기", enabled = customInput.isNotBlank()) {
-                    handleAnswer(customInput.trim(), answers, questionIndex, questionLimit, { questionIndex = it }, { draft = it; mode = "review" })
-                    customInput = ""
+                    submitCustomAnswer()
                 }
                 if (questionIndex > 0) {
                     TextButton(onClick = { draft = makeDiaryText(answers); mode = "review" }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
@@ -622,7 +659,17 @@ TestDatePicker(recordDate, { recordDate = it })
             }
             "review" -> WhitePanel {
                 Text("오늘의 조각", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                HaruTextField(draft, { draft = it }, "기록 문장", Modifier.height(150.dp))
+                HaruTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = "기록 문장",
+                    modifier = Modifier.height(150.dp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = {
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
+                    })
+                )
                 OutlinedSoftButton(if (selectedPhotoUri == null) "사진 추가" else "사진 바꾸기") {
                     photoPicker.launch(arrayOf("image/*"))
                 }
@@ -630,6 +677,8 @@ TestDatePicker(recordDate, { recordDate = it })
                     PhotoPreview(uri, Modifier.height(150.dp))
                 }
                 PrimaryButton("확인", enabled = draft.isNotBlank()) {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
                     onSaveEntry(newEntry(draft, "normal", recordDate, selectedPhotoUri))
                     mode = "done"
                 }
@@ -673,7 +722,20 @@ fun handleAnswer(
 
 @Composable
 fun AppScreen(title: String, subtitle: String? = null, content: @Composable ColumnScope.() -> Unit) {
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                })
+            },
+        color = MaterialTheme.colorScheme.background
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1383,11 +1445,24 @@ fun HaruTextField(
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     keyboardActions: KeyboardActions = KeyboardActions()
 ) {
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val coroutineScope = rememberCoroutineScope()
+
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(bringIntoViewRequester)
+            .onFocusChanged { focusState ->
+                if (focusState.isFocused) {
+                    coroutineScope.launch {
+                        delay(120)
+                        bringIntoViewRequester.bringIntoView()
+                    }
+                }
+            },
         keyboardOptions = keyboardOptions,
         keyboardActions = keyboardActions,
         shape = RoundedCornerShape(22.dp),
@@ -1533,7 +1608,11 @@ fun parseAiQuestion(raw: String): Question? {
             )
         }.filter { it.label.isNotBlank() && it.sentence.isNotBlank() }
 
-        if (options.isEmpty()) null else Question(json.getString("question"), options)
+        if (options.isEmpty()) null else Question(
+            title = json.getString("question"),
+            options = options,
+            category = json.optString("category").ifBlank { inferQuestionCategory(json.getString("question") + " " + options.joinToString(" ") { it.label }) }
+        )
     }.getOrNull()
 }
 fun inferRecentCategories(entries: List<DiaryEntry>): List<String> {
@@ -1552,7 +1631,27 @@ fun inferRecentCategories(entries: List<DiaryEntry>): List<String> {
     addIf("소비", "샀", "구매", "돈", "결제")
     return categories.distinct().takeLast(4)
 }
-fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now()): List<Question> {
+
+fun inferQuestionCategory(text: String): String {
+    return when {
+        listOf("식사", "밥", "점심", "저녁", "아침", "먹", "메뉴").any { text.contains(it) } -> "식사"
+        listOf("잠", "수면", "잤", "설쳤", "늦게").any { text.contains(it) } -> "수면"
+        listOf("몸", "컨디션", "피곤", "아팠", "상태").any { text.contains(it) } -> "컨디션"
+        listOf("날씨", "비", "맑", "흐", "눈", "더웠", "추웠").any { text.contains(it) } -> "날씨"
+        listOf("기분", "좋", "나빴", "감정").any { text.contains(it) } -> "기분"
+        listOf("운동", "산책", "헬스", "뛰").any { text.contains(it) } -> "운동"
+        listOf("회사", "업무", "학교", "공부", "일").any { text.contains(it) } -> "일/학교"
+        else -> "오늘 한 일"
+    }
+}
+
+fun shouldUseAiQuestion(question: Question, entries: List<DiaryEntry>, recordDate: LocalDate, step: Int): Boolean {
+    if (step != 1) return true
+    val category = question.category.ifBlank { inferQuestionCategory(question.title) }
+    val todayCategories = inferRecentCategories(entries.filter { it.date == recordDate.format(DateFormatter) }).toSet()
+    return category !in todayCategories
+}
+fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now(), entries: List<DiaryEntry> = emptyList()): List<Question> {
     val firstQuestions = listOf(
         Question(
             "오늘 식사는 어떻게 챙기셨나요?",
@@ -1561,7 +1660,8 @@ fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now
                 AnswerOption("간단히 해결했어요", "오늘은 식사를 간단하게 해결했다."),
                 AnswerOption("거의 못 챙겼어요", "오늘은 식사를 제대로 챙기지 못했다."),
                 AnswerOption("평소와 비슷했어요", "오늘 식사는 평소와 비슷했다.")
-            )
+            ),
+            "식사"
         ),
         Question(
             "오늘 몸 상태는 어땠나요?",
@@ -1570,7 +1670,8 @@ fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now
                 AnswerOption("조금 피곤했어요", "오늘은 몸이 조금 피곤했다."),
                 AnswerOption("무거웠어요", "오늘은 몸이 무겁게 느껴졌다."),
                 AnswerOption("평소 같았어요", "오늘 몸 상태는 평소와 비슷했다.")
-            )
+            ),
+            "컨디션"
         ),
         Question(
             "오늘 한 일 중 하나만 고르면 무엇인가요?",
@@ -1579,7 +1680,8 @@ fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now
                 AnswerOption("집안일", "오늘은 집안일을 했다."),
                 AnswerOption("이동", "오늘은 이동하는 시간이 있었다."),
                 AnswerOption("휴식", "오늘은 쉬는 시간을 가졌다.")
-            )
+            ),
+            "오늘 한 일"
         ),
         Question(
             "오늘 날씨는 어떻게 느껴졌나요?",
@@ -1588,38 +1690,167 @@ fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now
                 AnswerOption("흐렸어요", "오늘은 날씨가 흐렸다."),
                 AnswerOption("비가 왔어요", "오늘은 비가 왔다."),
                 AnswerOption("잘 모르겠어요", "오늘은 날씨를 크게 신경 쓰지 못했다.")
-            )
+            ),
+            "날씨"
+        ),
+        Question(
+            "오늘 잠은 어땠나요?",
+            listOf(
+                AnswerOption("잘 잤어요", "오늘은 잠을 잘 잤다."),
+                AnswerOption("조금 설쳤어요", "오늘은 잠을 조금 설쳤다."),
+                AnswerOption("늦게 잤어요", "오늘은 늦게 잤다."),
+                AnswerOption("평소 같았어요", "오늘 잠은 평소와 비슷했다.")
+            ),
+            "수면"
         )
     )
-    val first = firstQuestions[date.dayOfYear % firstQuestions.size]
-    val second = Question(
-        "그렇게 보낸 이유에 가까운 건 무엇인가요?",
+
+    val todayCategories = inferRecentCategories(entries.filter { it.date == date.format(DateFormatter) }).toSet()
+    val seed = date.dayOfYear + entries.count { it.date == date.format(DateFormatter) }
+    val rotated = firstQuestions.drop(seed % firstQuestions.size) + firstQuestions.take(seed % firstQuestions.size)
+    val first = rotated.firstOrNull { it.category !in todayCategories } ?: rotated.first()
+
+    return listOf(
+        first,
+        reasonQuestionFor(first.category),
+        patternQuestionFor(first.category),
+        nextFocusQuestionFor(first.category)
+    ).take(limit)
+}
+
+fun reasonQuestionFor(category: String): Question {
+    return when (category) {
+        "식사" -> Question(
+            "식사를 그렇게 챙긴 이유는 무엇에 가까웠나요?",
+            listOf(
+                AnswerOption("시간이 없어서", "시간이 없어서 식사를 그렇게 챙겼다."),
+                AnswerOption("먹고 싶은 게 있어서", "먹고 싶은 음식이 있어서 그렇게 먹었다."),
+                AnswerOption("입맛이 없어서", "입맛이 없어 식사를 가볍게 챙겼다."),
+                AnswerOption("평소처럼", "평소처럼 식사를 챙겼다.")
+            ),
+            "식사"
+        )
+        "컨디션" -> Question(
+            "몸 상태가 그렇게 느껴진 이유는 무엇 같나요?",
+            listOf(
+                AnswerOption("잠 때문", "잠의 영향으로 몸 상태가 그렇게 느껴졌다."),
+                AnswerOption("일정 때문", "일정의 영향으로 몸 상태가 그렇게 느껴졌다."),
+                AnswerOption("운동이나 활동 때문", "활동량의 영향으로 몸 상태가 그렇게 느껴졌다."),
+                AnswerOption("잘 모르겠어요", "몸 상태가 왜 그랬는지는 잘 모르겠다.")
+            ),
+            "컨디션"
+        )
+        "날씨" -> Question(
+            "그 날씨가 오늘 하루에 영향을 줬나요?",
+            listOf(
+                AnswerOption("조금 있었어요", "오늘 날씨가 하루에 조금 영향을 줬다."),
+                AnswerOption("크게 있었어요", "오늘 날씨가 하루에 꽤 영향을 줬다."),
+                AnswerOption("거의 없었어요", "오늘 날씨는 하루에 큰 영향을 주지 않았다."),
+                AnswerOption("잘 모르겠어요", "날씨가 하루에 영향을 줬는지는 잘 모르겠다.")
+            ),
+            "날씨"
+        )
+        "수면" -> Question(
+            "잠이 그렇게 된 이유는 무엇에 가까웠나요?",
+            listOf(
+                AnswerOption("늦게 누워서", "늦게 누워서 잠이 그렇게 됐다."),
+                AnswerOption("생각이 많아서", "생각이 많아서 잠이 편하지 않았다."),
+                AnswerOption("몸이 피곤해서", "몸이 피곤해서 잠의 영향이 있었다."),
+                AnswerOption("평소처럼", "잠은 평소와 비슷했다.")
+            ),
+            "수면"
+        )
+        else -> Question(
+            "그 일을 하게 된 이유는 무엇에 가까웠나요?",
+            listOf(
+                AnswerOption("해야 해서", "해야 할 일이어서 했다."),
+                AnswerOption("미뤄둔 일이라서", "미뤄둔 일을 처리했다."),
+                AnswerOption("하고 싶어서", "하고 싶어서 한 일이었다."),
+                AnswerOption("자연스럽게", "특별한 이유 없이 자연스럽게 하게 됐다.")
+            ),
+            category
+        )
+    }
+}
+
+fun patternQuestionFor(category: String): Question {
+    val target = when (category) {
+        "식사" -> "식사를 이렇게 챙기는 날"
+        "컨디션" -> "몸 상태가 이런 날"
+        "날씨" -> "날씨가 하루에 영향을 주는 날"
+        "수면" -> "잠이 이런 날"
+        else -> "이런 일을 하는 날"
+    }
+    return Question(
+        "요즘 ${target}이 자주 있나요?",
         listOf(
-            AnswerOption("일정이 있어서", "일정 때문에 그렇게 보낸 하루였다."),
-            AnswerOption("몸이 피곤해서", "몸이 피곤해서 그렇게 보낸 하루였다."),
-            AnswerOption("그냥 자연스럽게", "특별한 이유 없이 자연스럽게 그렇게 보냈다."),
-            AnswerOption("상황이 그렇게 돼서", "상황상 그렇게 보낼 수밖에 없었다.")
-        )
+            AnswerOption("자주 있어요", "요즘 ${target}이 자주 있다."),
+            AnswerOption("가끔 있어요", "가끔 ${target}이 있다."),
+            AnswerOption("드물어요", "${target}은 드문 편이다."),
+            AnswerOption("잘 모르겠어요", "${target}이 자주 있는지는 아직 잘 모르겠다.")
+        ),
+        category
     )
-    val third = Question(
-        "이런 날이 요즘 자주 있나요?",
+}
+
+fun nextFocusQuestionFor(category: String): Question {
+    return Question(
+        "다음에 비슷한 날이면 무엇을 더 남겨볼까요?",
         listOf(
-            AnswerOption("자주 있어요", "요즘 이런 날이 자주 있다."),
-            AnswerOption("가끔 있어요", "가끔 이런 날이 있다."),
-            AnswerOption("드물어요", "이런 날은 드문 편이다."),
-            AnswerOption("잘 모르겠어요", "이런 날이 자주 있는지는 아직 잘 모르겠다.")
-        )
+            AnswerOption("이유", "다음에는 이유를 조금 더 남겨보고 싶다."),
+            AnswerOption("시간", "다음에는 시간을 조금 더 남겨보고 싶다."),
+            AnswerOption("상황", "다음에는 상황을 조금 더 남겨보고 싶다."),
+            AnswerOption("그냥 한 줄만", "다음에도 한 줄 정도만 가볍게 남기고 싶다.")
+        ),
+        category
     )
-    val fourth = Question(
-        "다음에도 비슷하면 무엇을 남겨볼까요?",
-        listOf(
-            AnswerOption("식사", "다음에는 식사를 조금 더 남겨보고 싶다."),
-            AnswerOption("컨디션", "다음에는 컨디션을 조금 더 남겨보고 싶다."),
-            AnswerOption("한 일", "다음에는 오늘 한 일을 조금 더 남겨보고 싶다."),
-            AnswerOption("사람", "다음에는 사람과의 일을 조금 더 남겨보고 싶다.")
-        )
-    )
-    return listOf(first, second, third, fourth).take(limit)
+}
+
+fun sentenceFromCustomAnswer(answer: String, question: Question): String {
+    val category = question.category.ifBlank { inferQuestionCategory(question.title) }
+    val phrase = normalizeKoreanDiaryPhrase(answer)
+    if (looksLikeCompleteSentence(phrase)) return phrase.ensurePeriod()
+
+    return when (category) {
+        "식사" -> {
+            if (listOf("먹", "마셨", "마시", "챙", "해결").any { phrase.contains(it) }) {
+                "오늘은 $phrase."
+            } else {
+                "오늘은 ${phrase.withObjectParticle()} 먹었다."
+            }
+        }
+        "컨디션" -> if (phrase.contains("몸") || phrase.contains("컨디션")) "오늘은 $phrase." else "오늘은 컨디션이 $phrase."
+        "날씨" -> if (phrase.contains("날씨")) "오늘은 $phrase." else "오늘은 날씨가 $phrase."
+        "기분" -> if (phrase.contains("기분")) "오늘은 $phrase." else "오늘은 기분이 $phrase."
+        "수면" -> if (phrase.contains("잠")) "오늘은 $phrase." else "오늘은 잠이 $phrase."
+        else -> "오늘은 $phrase."
+    }.ensurePeriod()
+}
+
+fun normalizeKoreanDiaryPhrase(raw: String): String {
+    val text = raw.trim().trimEnd('.', '!', '?')
+    fun replaceEnding(suffix: String, replacement: String): String? {
+        return if (text.endsWith(suffix)) text.dropLast(suffix.length) + replacement else null
+    }
+    return replaceEnding("이었어요", "이었다")
+        ?: replaceEnding("였어요", "였다")
+        ?: replaceEnding("했어요", "했다")
+        ?: replaceEnding("됐어요", "됐다")
+        ?: replaceEnding("었어요", "었다")
+        ?: replaceEnding("았어요", "았다")
+        ?: replaceEnding("예요", "이다")
+        ?: replaceEnding("이에요", "이다")
+        ?: replaceEnding("어요", "었다")
+        ?: replaceEnding("아요", "았다")
+        ?: if (text.endsWith("요")) text.dropLast(1) else text
+}
+
+fun String.withObjectParticle(): String {
+    val value = trim()
+    if (value.isBlank()) return value
+    val last = value.last()
+    val hasBatchim = last in '가'..'힣' && ((last.code - '가'.code) % 28 != 0)
+    return value + if (hasBatchim) "을" else "를"
 }
 
 fun makeDiaryText(answers: List<String>): String {
@@ -1709,4 +1940,8 @@ fun saveEntries(context: Context, entries: List<DiaryEntry>) {
     }
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("entries", array.toString()).apply()
 }
+
+
+
+
 
