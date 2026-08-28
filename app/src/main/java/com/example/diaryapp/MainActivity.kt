@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -73,6 +74,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -354,6 +356,7 @@ fun OnboardingShell(title: String, subtitle: String, content: @Composable Column
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
@@ -376,6 +379,9 @@ fun ProfileScreen(
     onAgeChange: (String) -> Unit,
     onNext: () -> Unit
 ) {
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
     OnboardingShell("먼저, 가볍게", "질문을 조금 더 자연스럽게 건네기 위한 기본 정보예요.") {
         HaruTextField(name, onNameChange, "이름")
         Text("성별", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -384,7 +390,16 @@ fun ProfileScreen(
                 PillButton(item, gender == item, Modifier.weight(1f)) { onGenderChange(item) }
             }
         }
-        HaruTextField(age, onAgeChange, "나이")
+        HaruTextField(
+            value = age,
+            onValueChange = { input -> onAgeChange(input.filter { it.isDigit() }.take(3)) },
+            label = "나이",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = {
+                keyboardController?.hide()
+                focusManager.clearFocus()
+            })
+        )
         PrimaryButton("다음", enabled = name.isNotBlank() && age.isNotBlank(), onClick = onNext)
     }
 }
@@ -640,6 +655,7 @@ fun AppScreen(title: String, subtitle: String? = null, content: @Composable Colu
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(22.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp)
@@ -1337,12 +1353,21 @@ fun GhostTrashButton(onClick: () -> Unit) {
 }
 
 @Composable
-fun HaruTextField(value: String, onValueChange: (String) -> Unit, label: String, modifier: Modifier = Modifier) {
+fun HaruTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions()
+) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
         modifier = modifier.fillMaxWidth(),
+        keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
         shape = RoundedCornerShape(22.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -1662,13 +1687,4 @@ fun saveEntries(context: Context, entries: List<DiaryEntry>) {
     }
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("entries", array.toString()).apply()
 }
-
-
-
-
-
-
-
-
-
 
