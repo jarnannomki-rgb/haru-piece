@@ -1,0 +1,26 @@
+# Android / Gradle
+.gradle/
+build/
+**/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# Generated artifacts
+*.apk
+*.aab
+*.ap_
+app-debug.b64
+captures/
+
+# Local test helpers
+*.log
+
+# Secrets
+*.jks
+*.keystore
+key.properties
+.env
+.env.*
