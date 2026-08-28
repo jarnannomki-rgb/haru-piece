@@ -13,6 +13,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -66,6 +68,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -79,6 +82,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -283,20 +288,21 @@ fun OnboardingFlow(onComplete: (Profile) -> Unit) {
 
     when (step) {
         0 -> SplashScreen { step = 1 }
-        1 -> ProfileScreen(
+        1 -> IntroQuestionScreen { step = 2 }
+        2 -> ProfileScreen(
             name = name,
             gender = gender,
             age = age,
             onNameChange = { name = it },
             onGenderChange = { gender = it },
             onAgeChange = { age = it },
-            onNext = { step = 2 }
-        )
-        2 -> TopicScreen(
-            selectedTopics = topics,
             onNext = { step = 3 }
         )
-        3 -> NotificationScreen(
+        3 -> TopicScreen(
+            selectedTopics = topics,
+            onNext = { step = 4 }
+        )
+        4 -> NotificationScreen(
             notifyTimes = notifyTimes,
             onComplete = {
                 onComplete(
@@ -332,19 +338,35 @@ fun SplashScreen(onDone: () -> Unit) {
 
 @Composable
 fun IntroQuestionScreen(onDone: () -> Unit) {
+    val alpha = remember { Animatable(0f) }
+    val offsetY = remember { Animatable(18f) }
+
     LaunchedEffect(Unit) {
-        delay(1800)
+        coroutineScope {
+            launch { alpha.animateTo(1f, animationSpec = tween(720)) }
+            launch { offsetY.animateTo(0f, animationSpec = tween(720)) }
+        }
+        delay(850)
+        coroutineScope {
+            launch { alpha.animateTo(0f, animationSpec = tween(620)) }
+            launch { offsetY.animateTo(-14f, animationSpec = tween(620)) }
+        }
         onDone()
     }
+
     Surface(modifier = Modifier.fillMaxSize(), color = Color.White) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
                 "1분만 오늘을\n기록해볼까요?",
+                modifier = Modifier.graphicsLayer {
+                    this.alpha = alpha.value
+                    translationY = offsetY.value
+                },
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = Color(0xFF2F2525),
                 textAlign = TextAlign.Center,
-                lineHeight = 40.sp
+                lineHeight = 42.sp
             )
         }
     }
