@@ -7,6 +7,8 @@ import android.os.Build
 import android.widget.ImageView
 import android.net.Uri
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,10 +25,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -77,6 +81,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
@@ -101,6 +106,9 @@ import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.io.File
+import java.io.FileOutputStream
+import java.util.UUID
 
 private const val PREFS_NAME = "haru_piece_prefs"
 private val QUESTION_FUNCTION_URL = BuildConfig.QUESTION_FUNCTION_URL
@@ -514,6 +522,9 @@ fun MainTabs(
     onReset: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf("오늘") }
+    val density = LocalDensity.current
+    val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
+
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Box(modifier = Modifier.weight(1f)) {
             when (selectedTab) {
@@ -523,8 +534,9 @@ fun MainTabs(
                 "설정" -> SettingsScreen(profile, themeName, onSaveProfile, onThemeChange) { selectedTab = "달력" }
             }
         }
-        NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
-            listOf("오늘", "달력", "검색", "설정").forEach { tab ->
+        if (!isKeyboardVisible) {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
+                listOf("오늘", "달력", "검색", "설정").forEach { tab ->
                 NavigationBarItem(
                     selected = selectedTab == tab,
                     onClick = { selectedTab = tab },
@@ -538,6 +550,7 @@ fun MainTabs(
                         unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 )
+                }
             }
         }
     }
@@ -560,10 +573,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     var aiLoading by remember { mutableStateOf(false) }
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            selectedPhotoUri = uri.toString()
+            selectedPhotoUri = savePhotoToAppStorage(context, uri) ?: uri.toString()
         }
     }
     val questionLimit = when {
@@ -572,7 +582,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         entries.size >= 3 -> 2
         else -> 1
     }
-    val localQuestions = buildQuestions(profile, questionLimit, recordDate, entries)
+    val localQuestions = buildQuestions(profile, questionLimit, recordDate, entries, answers.toList())
     val currentQuestion = aiQuestions.getOrNull(questionIndex) ?: localQuestions[questionIndex]
 
     fun submitCustomAnswer() {
@@ -586,7 +596,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     }
 
     LaunchedEffect(mode, questionIndex, recordDate, answers.size) {
-        if (mode == "question" && aiQuestions.getOrNull(questionIndex) == null && !aiLoading) {
+        if (mode == "question" && questionIndex == 0 && aiQuestions.getOrNull(questionIndex) == null && !aiLoading) {
             aiLoading = true
             val aiQuestion = fetchAiQuestion(profile, entries, recordDate, questionIndex + 1, answers.toList(), questionLimit)
             if (aiQuestion != null && shouldUseAiQuestion(aiQuestion, entries, recordDate, questionIndex + 1)) {
@@ -651,6 +661,20 @@ TestDatePicker(recordDate, { recordDate = it })
                 PrimaryButton("기타로 남기기", enabled = customInput.isNotBlank()) {
                     submitCustomAnswer()
                 }
+                TextButton(
+                    onClick = {
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
+                        answers.clear()
+                        customInput = ""
+                        aiQuestions.clear()
+                        questionIndex = 0
+                        mode = "start"
+                    },
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                ) {
+                    Text("취소", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f))
+                }
                 if (questionIndex > 0) {
                     TextButton(onClick = { draft = makeDiaryText(answers); mode = "review" }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                         Text("여기까지", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -679,7 +703,7 @@ TestDatePicker(recordDate, { recordDate = it })
                 PrimaryButton("확인", enabled = draft.isNotBlank()) {
                     keyboardController?.hide()
                     focusManager.clearFocus()
-                    onSaveEntry(newEntry(draft, "normal", recordDate, selectedPhotoUri))
+                    onSaveEntry(newEntry(polishDiaryText(draft), "normal", recordDate, selectedPhotoUri))
                     mode = "done"
                 }
             }
@@ -1397,15 +1421,22 @@ fun PhotoPreview(uri: String, modifier: Modifier = Modifier) {
     AndroidView(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp)),
+            .clip(RoundedCornerShape(18.dp))
+            .background(PeachSoft.copy(alpha = 0.42f)),
         factory = { context ->
             ImageView(context).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                adjustViewBounds = true
                 setBackgroundColor(android.graphics.Color.TRANSPARENT)
             }
         },
         update = { imageView ->
-            imageView.setImageURI(Uri.parse(uri))
+            val parsed = Uri.parse(uri)
+            if (parsed.scheme.isNullOrBlank()) {
+                imageView.setImageURI(Uri.fromFile(File(uri)))
+            } else {
+                imageView.setImageURI(parsed)
+            }
         }
     )
 }
@@ -1651,7 +1682,7 @@ fun shouldUseAiQuestion(question: Question, entries: List<DiaryEntry>, recordDat
     val todayCategories = inferRecentCategories(entries.filter { it.date == recordDate.format(DateFormatter) }).toSet()
     return category !in todayCategories
 }
-fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now(), entries: List<DiaryEntry> = emptyList()): List<Question> {
+fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now(), entries: List<DiaryEntry> = emptyList(), answers: List<String> = emptyList()): List<Question> {
     val firstQuestions = listOf(
         Question(
             "오늘 식사는 어떻게 챙기셨나요?",
@@ -1806,6 +1837,22 @@ fun nextFocusQuestionFor(category: String): Question {
     )
 }
 
+fun polishDiaryText(raw: String): String {
+    var text = raw.trim()
+        .replace(Regex("오늘은\\s+오늘은"), "오늘은")
+        .replace("힘들어 하루였다", "힘든 하루였다")
+        .replace("좋아 하루였다", "좋은 하루였다")
+        .replace("나빠 하루였다", "좋지 않은 하루였다")
+        .replace("괜찮아 하루였다", "괜찮은 하루였다")
+        .replace("피곤해 하루였다", "피곤한 하루였다")
+        .replace("무거워 하루였다", "몸이 무거운 하루였다")
+        .replace("오늘은 컨디션이 힘들어", "오늘은 컨디션이 좋지 않아")
+        .replace("오늘은 기분이 좋아", "오늘은 기분이 좋았다")
+        .replace("오늘은 날씨가 좋아", "오늘은 날씨가 좋았다")
+
+    text = text.replace(Regex("\\s+"), " ").trim()
+    return if (text.isBlank()) "오늘은 조용히 지나간 하루였다." else text.ensurePeriod()
+}
 fun sentenceFromCustomAnswer(answer: String, question: Question): String {
     val category = question.category.ifBlank { inferQuestionCategory(question.title) }
     val phrase = normalizeKoreanDiaryPhrase(answer)
@@ -1860,7 +1907,7 @@ fun makeDiaryText(answers: List<String>): String {
     val tail = cleaned.drop(1)
     return buildString {
         if (looksLikeCompleteSentence(first)) {
-            append(first.ensurePeriod())
+            append(polishDiaryText(first))
         } else {
             append("오늘은 ").append(first.trimEnd('.', '다')).append(" 하루였다.")
         }
@@ -1881,6 +1928,33 @@ fun String.ensurePeriod(): String {
     return if (value.endsWith(".") || value.endsWith("!") || value.endsWith("?")) value else "$value."
 }
 
+fun savePhotoToAppStorage(context: Context, sourceUri: Uri): String? {
+    return runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(sourceUri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+
+        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, 1600)
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val bitmap = context.contentResolver.openInputStream(sourceUri)?.use { BitmapFactory.decodeStream(it, null, options) } ?: return@runCatching null
+
+        val photosDir = File(context.filesDir, "entry_photos").apply { mkdirs() }
+        val output = File(photosDir, "${UUID.randomUUID()}.jpg")
+        FileOutputStream(output).use { stream ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 84, stream)
+        }
+        bitmap.recycle()
+        output.absolutePath
+    }.getOrNull()
+}
+
+fun calculateImageSampleSize(width: Int, height: Int, maxSize: Int): Int {
+    if (width <= 0 || height <= 0) return 1
+    var sampleSize = 1
+    while (width / sampleSize > maxSize || height / sampleSize > maxSize) {
+        sampleSize *= 2
+    }
+    return sampleSize
+}
 fun newEntry(text: String, kind: String, date: LocalDate = LocalDate.now(), photoUri: String? = null): DiaryEntry {
     return DiaryEntry(date.format(DateFormatter), LocalTime.now().format(TimeFormatter), text, kind, photoUri)
 }
@@ -1940,6 +2014,12 @@ fun saveEntries(context: Context, entries: List<DiaryEntry>) {
     }
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("entries", array.toString()).apply()
 }
+
+
+
+
+
+
 
 
 
