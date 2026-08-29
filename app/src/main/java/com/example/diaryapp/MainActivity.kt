@@ -11,6 +11,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -112,6 +113,7 @@ import java.util.UUID
 
 private const val PREFS_NAME = "haru_piece_prefs"
 private val QUESTION_FUNCTION_URL = BuildConfig.QUESTION_FUNCTION_URL
+private val SENTENCE_FUNCTION_URL = BuildConfig.SENTENCE_FUNCTION_URL
 private const val AI_LOG_TAG = "HaruAi"
 private val DateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy.MM.dd")
 private val TimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
@@ -399,6 +401,7 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
                 topicFollowUpDismissed = false
                 topicFollowUpStage = "prompt"
                 topicDetailStage = "prompt"
+                topicExpansionStage = "prompt"
             }
         )
     }
@@ -729,6 +732,8 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     var showResetConfirm by remember { mutableStateOf(false) }
     val aiQuestions = remember { mutableStateListOf<Question>() }
     var aiLoading by remember { mutableStateOf(false) }
+    var sentenceLoading by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             selectedPhotoUri = savePhotoToAppStorage(context, uri) ?: uri.toString()
@@ -743,11 +748,32 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     val localQuestions = buildQuestions(profile, questionLimit, recordDate, entries, answers.toList())
     val currentQuestion = aiQuestions.getOrNull(questionIndex) ?: localQuestions[questionIndex]
 
+    fun finishWithAi(nextAnswers: List<String>) {
+        val fallbackDraft = makeDiaryText(nextAnswers)
+        draft = fallbackDraft
+        mode = "review"
+        sentenceLoading = true
+        coroutineScope.launch {
+            val aiDraft = fetchAiDiarySentence(profile, entries, recordDate, nextAnswers, fallbackDraft)
+            if (!aiDraft.isNullOrBlank()) draft = aiDraft
+            sentenceLoading = false
+        }
+    }
+
+    fun submitAnswer(answer: String) {
+        answers.add(answer)
+        if (questionIndex + 1 >= questionLimit) {
+            finishWithAi(answers.toList())
+        } else {
+            questionIndex += 1
+        }
+    }
+
     fun submitCustomAnswer() {
         val input = customInput.trim()
         if (input.isBlank()) return
         val answer = sentenceFromCustomAnswer(input, currentQuestion)
-        handleAnswer(answer, answers, questionIndex, questionLimit, { questionIndex = it }, { draft = it; mode = "review" })
+        submitAnswer(answer)
         customInput = ""
         keyboardController?.hide()
         focusManager.clearFocus()
@@ -807,7 +833,7 @@ TestDatePicker(recordDate, { recordDate = it })
                 Text("${questionIndex + 1} / $questionLimit", color = CoralDark, fontWeight = FontWeight.Bold)
                 Text(currentQuestion.title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
                 currentQuestion.options.forEach { option ->
-                    OutlinedSoftButton(option.label) { handleAnswer(option.sentence, answers, questionIndex, questionLimit, { questionIndex = it }, { draft = it; mode = "review" }) }
+                    OutlinedSoftButton(option.label) { submitAnswer(option.sentence) }
                 }
                 HaruTextField(
                     value = customInput,
@@ -834,13 +860,14 @@ TestDatePicker(recordDate, { recordDate = it })
                     Text("취소", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f))
                 }
                 if (questionIndex > 0) {
-                    TextButton(onClick = { draft = makeDiaryText(answers); mode = "review" }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                    TextButton(onClick = { finishWithAi(answers.toList()) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                         Text("여기까지", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
             "review" -> WhitePanel {
                 Text("오늘의 조각", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                if (sentenceLoading) Text("문장을 정리하고 있어요.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 HaruTextField(
                     value = draft,
                     onValueChange = { draft = it },
@@ -1228,6 +1255,7 @@ fun SettingsScreen(
     var minute by remember { mutableStateOf(currentTime.third) }
     val selectedDays = remember { mutableStateListOf("매일") }
     val selectedReminder = formatReminder(selectedDays, period, hour, minute)
+    BackHandler(enabled = section != "menu") { section = "menu" }
     val notifyTimes = remember(profile) {
         mutableStateListOf<String>().also { list ->
             list.addAll(profile.notifyTimes.map(::normalizeReminderText).distinct())
@@ -1806,6 +1834,66 @@ suspend fun fetchAiQuestion(
     }
 }
 
+
+suspend fun fetchAiDiarySentence(
+    profile: Profile,
+    entries: List<DiaryEntry>,
+    recordDate: LocalDate,
+    answers: List<String>,
+    fallbackDraft: String
+): String? = withTimeoutOrNull(12000) {
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val payload = JSONObject()
+                .put("recordDate", recordDate.format(DateFormatter))
+                .put("answers", JSONArray(answers))
+                .put("fallbackDraft", fallbackDraft)
+                .put("profile", JSONObject()
+                    .put("age", profile.age)
+                    .put("gender", profile.gender)
+                    .put("topics", JSONArray(profile.topics))
+                    .put("topicDetails", JSONObject().also { details ->
+                        profile.topicDetails.forEach { (topic, values) -> details.put(topic, JSONArray(values)) }
+                    })
+                )
+                .put("recentEntries", JSONArray(entries.takeLast(5).map { it.text }))
+
+            val connection = (URL(SENTENCE_FUNCTION_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 5000
+                readTimeout = 12000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+            }
+
+            connection.outputStream.use { stream ->
+                stream.write(payload.toString().toByteArray(Charsets.UTF_8))
+            }
+
+            val status = connection.responseCode
+            val responseText = if (status in 200..299) {
+                connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } else {
+                connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            }
+            Log.i(AI_LOG_TAG, "AI sentence status=$status body=${responseText.take(220)}")
+            connection.disconnect()
+            if (status !in 200..299 || responseText.isBlank()) return@runCatching null
+
+            val wrapper = JSONObject(responseText)
+            val direct = wrapper.optString("sentence")
+            val raw = wrapper.optString("raw")
+            val sentence = direct.ifBlank {
+                raw.takeIf { it.isNotBlank() }?.let { rawText ->
+                    runCatching {
+                        JSONObject(rawText.replace("```json", "").replace("```", "").trim()).optString("sentence")
+                    }.getOrNull()
+                }.orEmpty()
+            }
+            sentence.takeIf { it.isNotBlank() }?.let(::polishDiaryText)
+        }.onFailure { Log.w(AI_LOG_TAG, "AI sentence request failed", it) }.getOrNull()
+    }
+}
 fun parseAiQuestion(raw: String): Question? {
     val jsonText = raw
         .replace("```json", "")

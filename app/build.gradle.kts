@@ -24,10 +24,12 @@ android {
         create("local") {
             dimension = "environment"
             buildConfigField("String", "QUESTION_FUNCTION_URL", "\"http://10.0.2.2:8787/generate-diary-question\"")
+            buildConfigField("String", "SENTENCE_FUNCTION_URL", "\"http://10.0.2.2:8787/generate-diary-sentence\"")
         }
         create("phone") {
             dimension = "environment"
             buildConfigField("String", "QUESTION_FUNCTION_URL", "\"https://lhtnpawocnyknfvgcjph.supabase.co/functions/v1/generate-diary-question\"")
+            buildConfigField("String", "SENTENCE_FUNCTION_URL", "\"https://lhtnpawocnyknfvgcjph.supabase.co/functions/v1/generate-diary-sentence\"")
         }
     }
 
