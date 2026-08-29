@@ -255,6 +255,7 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
     var topicFollowUpDismissed by remember { mutableStateOf(false) }
     var topicFollowUpStage by remember { mutableStateOf("prompt") }
     var topicDetailStage by remember { mutableStateOf("prompt") }
+    var topicExpansionStage by remember { mutableStateOf("prompt") }
     val entries = remember { mutableStateListOf<DiaryEntry>().also { it.addAll(loadEntries(context)) } }
     val followUpTopics = remember(profile?.topics) { mutableStateListOf<String>().also { it.addAll(profile?.topics.orEmpty()) } }
     val pendingDetailTopic = profile?.topics?.firstOrNull { profile?.topicDetails?.get(it).isNullOrEmpty() }
@@ -265,6 +266,7 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
     val canShowTopicPrompt = profile != null && launchDone && recordedDays >= 3 && recordedDays >= profile!!.topicPromptDismissedDay + 2
     val shouldShowTopicFollowUp = canShowTopicPrompt && profile!!.topics.isEmpty() && !topicFollowUpDismissed
     val shouldShowTopicDetailFollowUp = canShowTopicPrompt && profile!!.topics.isNotEmpty() && pendingDetailTopic != null && recordedDays >= nextDetailDay
+    val shouldShowTopicExpansionFollowUp = canShowTopicPrompt && profile!!.topics.size in 1..2 && pendingDetailTopic == null
 
     LaunchedEffect(profile?.notifyTimes) {
         profile?.let { scheduleDiaryReminders(context, it.notifyTimes) }
@@ -316,7 +318,7 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
                 onNext = {
                     val updatedDetails = profile!!.topicDetails.toMutableMap()
                     updatedDetails[topic] = detailSelections.distinct()
-                    val savedProfile = profile!!.copy(topicDetails = updatedDetails, topicPromptDismissedDay = 0)
+                    val savedProfile = profile!!.copy(topicDetails = updatedDetails, topicPromptDismissedDay = recordedDays)
                     profile = savedProfile
                     saveProfile(context, savedProfile)
                     topicDetailStage = "prompt"
@@ -340,6 +342,32 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
                     profile = savedProfile
                     saveProfile(context, savedProfile)
                     topicDetailStage = "prompt"
+                }
+            )
+        }
+    } else if (shouldShowTopicExpansionFollowUp) {
+        if (topicExpansionStage == "select") {
+            TopicScreen(followUpTopics) {
+                val savedProfile = profile!!.copy(
+                    topics = followUpTopics.distinct(),
+                    topicPromptDismissedDay = recordedDays
+                )
+                profile = savedProfile
+                saveProfile(context, savedProfile)
+                topicExpansionStage = "prompt"
+            }
+        } else {
+            TopicNudgeScreen(
+                title = "다른 것도 남겨볼까요?",
+                subtitle = "관심사가 조금 더 있으면 질문이 덜 반복돼요.",
+                positiveText = "골라볼게요",
+                negativeText = "다음에 할게요",
+                onPositive = { topicExpansionStage = "select" },
+                onNegative = {
+                    val savedProfile = profile!!.copy(topicPromptDismissedDay = recordedDays)
+                    profile = savedProfile
+                    saveProfile(context, savedProfile)
+                    topicExpansionStage = "prompt"
                 }
             )
         }
@@ -496,7 +524,7 @@ fun OnboardingShell(title: String, subtitle: String, content: @Composable Column
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             Spacer(Modifier.height(12.dp))
-            Text(title, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+            Text(title, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 40.sp)
             Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp, lineHeight = 23.sp)
             WhitePanel { content() }
         }
@@ -606,9 +634,10 @@ fun detailOptionsFor(topic: String): List<String> {
 }
 @Composable
 fun NotificationScreen(notifyTimes: MutableList<String>, onComplete: () -> Unit) {
-    var period by remember { mutableStateOf("오후") }
-    var hour by remember { mutableStateOf(10) }
-    var minute by remember { mutableStateOf(0) }
+    val currentTime = remember { currentReminderTimeParts() }
+    var period by remember { mutableStateOf(currentTime.first) }
+    var hour by remember { mutableStateOf(currentTime.second) }
+    var minute by remember { mutableStateOf(currentTime.third) }
     val selectedDays = remember { mutableStateListOf("매일") }
     val selectedReminder = formatReminder(selectedDays, period, hour, minute)
 
@@ -1193,14 +1222,20 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var section by remember { mutableStateOf("menu") }
-    var period by remember { mutableStateOf("오전") }
-    var hour by remember { mutableStateOf(9) }
-    var minute by remember { mutableStateOf(30) }
+    val currentTime = remember { currentReminderTimeParts() }
+    var period by remember { mutableStateOf(currentTime.first) }
+    var hour by remember { mutableStateOf(currentTime.second) }
+    var minute by remember { mutableStateOf(currentTime.third) }
     val selectedDays = remember { mutableStateListOf("매일") }
     val selectedReminder = formatReminder(selectedDays, period, hour, minute)
     val notifyTimes = remember(profile) {
         mutableStateListOf<String>().also { list ->
             list.addAll(profile.notifyTimes.map(::normalizeReminderText).distinct())
+        }
+    }
+    val settingsTopics = remember(profile.topics) {
+        mutableStateListOf<String>().also { list ->
+            list.addAll(profile.topics)
         }
     }
 
@@ -1253,13 +1288,24 @@ fun SettingsScreen(
                 }
             }
         }
+        "topics" -> TopicScreen(settingsTopics) {
+            val selectedTopics = settingsTopics.distinct()
+            val selectedDetails = profile.topicDetails.filterKeys { it in selectedTopics }
+            onSaveProfile(profile.copy(topics = selectedTopics, topicDetails = selectedDetails))
+            section = "menu"
+        }
         else -> AppScreen("설정", "${profile.name}님의 하루조각") {
             WhitePanel {
                 SettingRow("알람", "${profile.notifyTimes.size}개의 기록 알림", onClick = { section = "alarm" })
                 SettingRow("분위기", themeName, onClick = { section = "theme" })
+                SettingRow("자주 남기고 싶은 것", topicSummary(profile.topics), onClick = { section = "topics" })
             }
         }
     }
+}
+
+fun topicSummary(topics: List<String>): String {
+    return if (topics.isEmpty()) "아직 선택하지 않음" else topics.joinToString(", ")
 }
 @Composable
 fun SettingRow(title: String, subtitle: String, onClick: () -> Unit) {
@@ -1436,6 +1482,13 @@ fun ScrollWheelColumn(
     }
 }
 
+
+fun currentReminderTimeParts(): Triple<String, Int, Int> {
+    val now = LocalTime.now()
+    val period = if (now.hour < 12) "오전" else "오후"
+    val hour12 = (now.hour % 12).let { if (it == 0) 12 else it }
+    return Triple(period, hour12, now.minute)
+}
 fun formatReminder(days: List<String>, period: String, hour: Int, minute: Int): String {
     return "${displayReminderDays(days)} ${formatTime24(period, hour, minute)}"
 }
@@ -1803,6 +1856,7 @@ fun inferQuestionCategory(text: String): String {
         listOf("날씨", "비", "맑", "흐", "눈", "더웠", "추웠").any { text.contains(it) } -> "날씨"
         listOf("기분", "좋", "나빴", "감정").any { text.contains(it) } -> "기분"
         listOf("운동", "산책", "헬스", "뛰").any { text.contains(it) } -> "운동"
+        listOf("이동", "버스", "지하철", "운전", "길", "출근", "퇴근").any { text.contains(it) } -> "이동"
         listOf("회사", "업무", "학교", "공부", "일").any { text.contains(it) } -> "일/학교"
         else -> "오늘 한 일"
     }
@@ -1812,7 +1866,8 @@ fun shouldUseAiQuestion(question: Question, entries: List<DiaryEntry>, recordDat
     if (step != 1) return true
     val category = question.category.ifBlank { inferQuestionCategory(question.title) }
     val todayCategories = inferRecentCategories(entries.filter { it.date == recordDate.format(DateFormatter) }).toSet()
-    return category !in todayCategories
+    val recentCategories = inferRecentCategories(entries.takeLast(3)).toSet()
+    return category !in todayCategories && (recentCategories.size >= 4 || category !in recentCategories)
 }
 fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now(), entries: List<DiaryEntry> = emptyList(), answers: List<String> = emptyList()): List<Question> {
     val firstQuestions = listOf(
@@ -1869,62 +1924,65 @@ fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now
     )
 
     val todayCategories = inferRecentCategories(entries.filter { it.date == date.format(DateFormatter) }).toSet()
-    val seed = date.dayOfYear + entries.count { it.date == date.format(DateFormatter) }
+    val seed = date.dayOfYear + entries.count { it.date == date.format(DateFormatter) } + entries.size
     val rotated = firstQuestions.drop(seed % firstQuestions.size) + firstQuestions.take(seed % firstQuestions.size)
     val first = rotated.firstOrNull { it.category !in todayCategories } ?: rotated.first()
+    val previousAnswer = answers.firstOrNull().orEmpty()
+    val followCategory = if (previousAnswer.isBlank()) first.category else inferQuestionCategory(previousAnswer)
 
     return listOf(
         first,
-        reasonQuestionFor(first.category),
-        patternQuestionFor(first.category),
-        nextFocusQuestionFor(first.category)
+        reasonQuestionFor(followCategory, previousAnswer),
+        patternQuestionFor(followCategory),
+        nextFocusQuestionFor(followCategory)
     ).take(limit)
 }
 
-fun reasonQuestionFor(category: String): Question {
+fun reasonQuestionFor(category: String, previousAnswer: String = ""): Question {
     return when (category) {
-        "식사" -> Question(
-            "식사를 그렇게 챙긴 이유는 무엇에 가까웠나요?",
-            listOf(
-                AnswerOption("시간이 없어서", "시간이 없어서 식사를 그렇게 챙겼다."),
-                AnswerOption("먹고 싶은 게 있어서", "먹고 싶은 음식이 있어서 그렇게 먹었다."),
-                AnswerOption("입맛이 없어서", "입맛이 없어 식사를 가볍게 챙겼다."),
-                AnswerOption("평소처럼", "평소처럼 식사를 챙겼다.")
-            ),
-            "식사"
-        )
+        "식사" -> mealReasonQuestion(previousAnswer)
         "컨디션" -> Question(
-            "몸 상태가 그렇게 느껴진 이유는 무엇 같나요?",
+            "몸 상태에 영향을 준 게 있었나요?",
             listOf(
-                AnswerOption("잠 때문", "잠의 영향으로 몸 상태가 그렇게 느껴졌다."),
-                AnswerOption("일정 때문", "일정의 영향으로 몸 상태가 그렇게 느껴졌다."),
-                AnswerOption("운동이나 활동 때문", "활동량의 영향으로 몸 상태가 그렇게 느껴졌다."),
+                AnswerOption("잠 때문", "잠의 영향으로 몸 상태가 달랐다."),
+                AnswerOption("일정 때문", "일정 때문에 몸 상태에 영향이 있었다."),
+                AnswerOption("활동량 때문", "활동량 때문에 몸 상태에 영향이 있었다."),
                 AnswerOption("잘 모르겠어요", "몸 상태가 왜 그랬는지는 잘 모르겠다.")
             ),
             "컨디션"
         )
         "날씨" -> Question(
-            "그 날씨가 오늘 하루에 영향을 줬나요?",
+            "날씨 때문에 달라진 게 있었나요?",
             listOf(
-                AnswerOption("조금 있었어요", "오늘 날씨가 하루에 조금 영향을 줬다."),
-                AnswerOption("크게 있었어요", "오늘 날씨가 하루에 꽤 영향을 줬다."),
-                AnswerOption("거의 없었어요", "오늘 날씨는 하루에 큰 영향을 주지 않았다."),
-                AnswerOption("잘 모르겠어요", "날씨가 하루에 영향을 줬는지는 잘 모르겠다.")
+                AnswerOption("기분", "날씨 때문에 기분이 조금 달랐다."),
+                AnswerOption("옷차림", "날씨에 맞춰 옷차림을 신경 썼다."),
+                AnswerOption("이동", "날씨 때문에 이동이 조금 달랐다."),
+                AnswerOption("별로 없었어요", "날씨 때문에 크게 달라진 것은 없었다.")
             ),
             "날씨"
         )
         "수면" -> Question(
-            "잠이 그렇게 된 이유는 무엇에 가까웠나요?",
+            "잠에 영향을 준 게 있었나요?",
             listOf(
-                AnswerOption("늦게 누워서", "늦게 누워서 잠이 그렇게 됐다."),
+                AnswerOption("늦게 누워서", "늦게 누워서 잠에 영향이 있었다."),
                 AnswerOption("생각이 많아서", "생각이 많아서 잠이 편하지 않았다."),
-                AnswerOption("몸이 피곤해서", "몸이 피곤해서 잠의 영향이 있었다."),
+                AnswerOption("몸이 피곤해서", "몸이 피곤해서 잠에 영향이 있었다."),
                 AnswerOption("평소처럼", "잠은 평소와 비슷했다.")
             ),
             "수면"
         )
+        "이동" -> Question(
+            "이동은 어땠나요?",
+            listOf(
+                AnswerOption("괜찮았어요", "이동은 크게 불편하지 않았다."),
+                AnswerOption("오래 걸렸어요", "이동하는 데 시간이 오래 걸렸다."),
+                AnswerOption("피곤했어요", "이동 때문에 조금 피곤했다."),
+                AnswerOption("평소 같았어요", "이동은 평소와 비슷했다.")
+            ),
+            "이동"
+        )
         else -> Question(
-            "그 일을 하게 된 이유는 무엇에 가까웠나요?",
+            "그 일을 하게 된 이유가 있었나요?",
             listOf(
                 AnswerOption("해야 해서", "해야 할 일이어서 했다."),
                 AnswerOption("미뤄둔 일이라서", "미뤄둔 일을 처리했다."),
@@ -1936,16 +1994,37 @@ fun reasonQuestionFor(category: String): Question {
     }
 }
 
+fun mealReasonQuestion(previousAnswer: String): Question {
+    val title = when {
+        previousAnswer.contains("간단") -> "간단히 먹은 이유가 있었나요?"
+        previousAnswer.contains("든든") -> "든든하게 챙겨 먹은 이유가 있었나요?"
+        previousAnswer.contains("못") || previousAnswer.contains("제대로") -> "식사를 잘 못 챙긴 이유가 있었나요?"
+        previousAnswer.contains("평소") -> "오늘 식사는 평소와 비슷했나요?"
+        else -> "식사에 영향을 준 게 있었나요?"
+    }
+    return Question(
+        title,
+        listOf(
+            AnswerOption("시간이 없어서", "시간이 없어서 식사를 그렇게 챙겼다."),
+            AnswerOption("먹고 싶은 게 있어서", "먹고 싶은 음식이 있어서 그렇게 먹었다."),
+            AnswerOption("입맛이 없어서", "입맛이 없어 식사를 가볍게 챙겼다."),
+            AnswerOption("평소처럼", "평소처럼 식사를 챙겼다.")
+        ),
+        "식사"
+    )
+}
+
 fun patternQuestionFor(category: String): Question {
     val target = when (category) {
         "식사" -> "식사를 이렇게 챙기는 날"
         "컨디션" -> "몸 상태가 이런 날"
-        "날씨" -> "날씨가 하루에 영향을 주는 날"
+        "날씨" -> "날씨가 신경 쓰이는 날"
         "수면" -> "잠이 이런 날"
+        "이동" -> "이동이 있는 날"
         else -> "이런 일을 하는 날"
     }
     return Question(
-        "요즘 ${target}이 자주 있나요?",
+        "요즘도 ${target}이 자주 있나요?",
         listOf(
             AnswerOption("자주 있어요", "요즘 ${target}이 자주 있다."),
             AnswerOption("가끔 있어요", "가끔 ${target}이 있다."),
@@ -1972,6 +2051,14 @@ fun nextFocusQuestionFor(category: String): Question {
 fun polishDiaryText(raw: String): String {
     var text = raw.trim()
         .replace(Regex("오늘은\\s+오늘은"), "오늘은")
+        .replace(Regex("오늘은\\s+(.+?)\\s+하루였다\\.?$")) { match ->
+            val middle = match.groupValues[1]
+            if (middle.endsWith("했다") || middle.endsWith("먹었다") || middle.endsWith("잤다") || middle.endsWith("있었다")) {
+                "오늘은 $middle"
+            } else {
+                match.value
+            }
+        }
         .replace("힘들어 하루였다", "힘든 하루였다")
         .replace("좋아 하루였다", "좋은 하루였다")
         .replace("나빠 하루였다", "좋지 않은 하루였다")
@@ -1981,29 +2068,106 @@ fun polishDiaryText(raw: String): String {
         .replace("오늘은 컨디션이 힘들어", "오늘은 컨디션이 좋지 않아")
         .replace("오늘은 기분이 좋아", "오늘은 기분이 좋았다")
         .replace("오늘은 날씨가 좋아", "오늘은 날씨가 좋았다")
+        .replace("오늘은 날씨가 좋은 하루였다", "오늘은 날씨가 좋았다")
+        .replace("오늘은 기분이 좋은 하루였다", "오늘은 기분이 좋았다")
+        .replace("오늘은 컨디션이 힘든 하루였다", "오늘은 컨디션이 좋지 않았다")
 
     text = text.replace(Regex("\\s+"), " ").trim()
     return if (text.isBlank()) "오늘은 조용히 지나간 하루였다." else text.ensurePeriod()
 }
+
 fun sentenceFromCustomAnswer(answer: String, question: Question): String {
     val category = question.category.ifBlank { inferQuestionCategory(question.title) }
     val phrase = normalizeKoreanDiaryPhrase(answer)
-    if (looksLikeCompleteSentence(phrase)) return phrase.ensurePeriod()
+    if (looksLikeCompleteSentence(phrase)) {
+        val sentence = if (phrase.startsWith("오늘") || phrase.startsWith("나는")) phrase else "오늘은 $phrase"
+        return polishDiaryText(sentence)
+    }
 
     return when (category) {
-        "식사" -> {
-            if (listOf("먹", "마셨", "마시", "챙", "해결").any { phrase.contains(it) }) {
-                "오늘은 $phrase."
-            } else {
-                "오늘은 ${phrase.withObjectParticle()} 먹었다."
-            }
-        }
-        "컨디션" -> if (phrase.contains("몸") || phrase.contains("컨디션")) "오늘은 $phrase." else "오늘은 컨디션이 $phrase."
-        "날씨" -> if (phrase.contains("날씨")) "오늘은 $phrase." else "오늘은 날씨가 $phrase."
-        "기분" -> if (phrase.contains("기분")) "오늘은 $phrase." else "오늘은 기분이 $phrase."
-        "수면" -> if (phrase.contains("잠")) "오늘은 $phrase." else "오늘은 잠이 $phrase."
-        else -> "오늘은 $phrase."
-    }.ensurePeriod()
+        "식사" -> mealSentenceFromPhrase(phrase)
+        "컨디션" -> stateSentenceFromPhrase("컨디션", phrase)
+        "날씨" -> weatherSentenceFromPhrase(phrase)
+        "기분" -> stateSentenceFromPhrase("기분", phrase)
+        "수면" -> sleepSentenceFromPhrase(phrase)
+        "이동" -> activitySentenceFromPhrase(phrase)
+        else -> activitySentenceFromPhrase(phrase)
+    }.let(::polishDiaryText)
+}
+
+fun mealSentenceFromPhrase(phrase: String): String {
+    return if (listOf("먹", "마셨", "마시", "챙", "해결").any { phrase.contains(it) }) {
+        "오늘은 $phrase"
+    } else {
+        "오늘은 ${phrase.withObjectParticle()} 먹었다"
+    }
+}
+
+fun weatherSentenceFromPhrase(phrase: String): String {
+    val state = normalizeStateWord(phrase)
+    return when {
+        phrase.contains("날씨") -> "오늘은 $state"
+        state == "비가 왔다" || state == "눈이 왔다" -> "오늘은 $state"
+        else -> "오늘은 날씨가 $state"
+    }
+}
+
+fun stateSentenceFromPhrase(subject: String, phrase: String): String {
+    val state = normalizeStateWord(phrase)
+    return if (phrase.contains(subject)) "오늘은 $state" else "오늘은 ${subject}이 $state"
+}
+
+fun sleepSentenceFromPhrase(phrase: String): String {
+    return when {
+        phrase in listOf("잠", "잠자기", "잠을 잤다", "잤다") -> "오늘은 잠을 잤다"
+        phrase.contains("잤") -> "오늘은 잠을 $phrase"
+        phrase.contains("잠") -> "오늘은 $phrase"
+        else -> "오늘은 잠이 ${normalizeStateWord(phrase)}"
+    }
+}
+
+fun activitySentenceFromPhrase(phrase: String): String {
+    val cleaned = phrase.trim()
+    val mapped = when (cleaned) {
+        "잠", "잠자기" -> "잠을 잤다"
+        "휴식", "쉬기" -> "쉬는 시간을 가졌다"
+        "청소" -> "청소를 했다"
+        "운전" -> "운전을 했다"
+        "회의" -> "회의를 했다"
+        "산책" -> "산책을 했다"
+        "공부" -> "공부를 했다"
+        "운동" -> "운동을 했다"
+        "이동" -> "이동하는 시간이 있었다"
+        else -> null
+    }
+    if (mapped != null) return "오늘은 $mapped"
+    if (looksLikeCompleteSentence(cleaned)) return cleaned
+    if (cleaned.endsWith("했다") || cleaned.endsWith("갔다") || cleaned.endsWith("왔다") || cleaned.endsWith("먹었다") || cleaned.endsWith("잤다")) {
+        return "오늘은 $cleaned"
+    }
+    if (cleaned.endsWith("기") && cleaned.length > 1) {
+        val noun = cleaned.dropLast(1)
+        return "오늘은 ${noun.withObjectParticle()} 했다"
+    }
+    return "오늘은 ${cleaned.withObjectParticle()} 했다"
+}
+
+fun normalizeStateWord(phrase: String): String {
+    return when (phrase.trim()) {
+        "좋아", "좋음", "좋았음" -> "좋았다"
+        "안 좋아", "안좋아", "나빠", "나쁨" -> "좋지 않았다"
+        "괜찮아", "괜찮음" -> "괜찮았다"
+        "피곤해", "피곤함" -> "피곤했다"
+        "힘들어", "힘듦" -> "힘들었다"
+        "무거워", "무거움" -> "무거웠다"
+        "맑아", "맑음" -> "맑았다"
+        "흐려", "흐림" -> "흐렸다"
+        "더워", "더움" -> "더웠다"
+        "추워", "추움" -> "추웠다"
+        "비", "비옴", "비가 왔음" -> "비가 왔다"
+        "눈", "눈옴", "눈이 왔음" -> "눈이 왔다"
+        else -> phrase
+    }
 }
 
 fun normalizeKoreanDiaryPhrase(raw: String): String {
@@ -2034,21 +2198,9 @@ fun String.withObjectParticle(): String {
 
 fun makeDiaryText(answers: List<String>): String {
     if (answers.isEmpty()) return "오늘은 조용히 지나간 하루였다."
-    val cleaned = answers.map { it.trim() }.filter { it.isNotBlank() }
-    val first = cleaned.first()
-    val tail = cleaned.drop(1)
-    return buildString {
-        if (looksLikeCompleteSentence(first)) {
-            append(polishDiaryText(first))
-        } else {
-            append("오늘은 ").append(first.trimEnd('.', '다')).append(" 하루였다.")
-        }
-        tail.forEach { sentence ->
-            append(" ").append(sentence.ensurePeriod())
-        }
-    }
+    val cleaned = answers.map { polishDiaryText(it.trim()) }.filter { it.isNotBlank() }
+    return cleaned.joinToString(" ") { it.ensurePeriod() }
 }
-
 fun looksLikeCompleteSentence(value: String): Boolean {
     val text = value.trim().trimEnd('.', '!', '?')
     return text.endsWith("다") || text.endsWith("했다") || text.endsWith("먹었다") || text.endsWith("보냈다")
