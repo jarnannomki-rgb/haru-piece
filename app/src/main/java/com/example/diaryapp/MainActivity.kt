@@ -132,6 +132,24 @@ private val TopicOptions = listOf(
     "가족", "집", "취미", "휴식",
     "공부", "이동", "약속", "생각"
 )
+private val TopicDetailOptions = mapOf(
+    "식사" to listOf("집밥", "외식", "배달", "도시락", "카페", "야식", "간식", "기타"),
+    "기분" to listOf("좋았던 일", "피곤함", "스트레스", "평온함", "아쉬움", "설렘", "기타"),
+    "일" to listOf("업무량", "회의", "성과", "야근", "동료", "출퇴근", "기타"),
+    "사람" to listOf("가족", "친구", "동료", "연인", "혼자", "대화", "기타"),
+    "건강" to listOf("컨디션", "수면", "통증", "약", "병원", "식단", "기타"),
+    "날씨" to listOf("맑음", "비", "흐림", "더움", "추움", "미세먼지", "기타"),
+    "소비" to listOf("생활비", "쇼핑", "외식", "카페", "교통", "충동구매", "기타"),
+    "운동" to listOf("걷기", "러닝", "헬스", "골프", "축구", "야구", "요가", "기타"),
+    "가족" to listOf("식사", "대화", "집안일", "부모님", "아이", "기념일", "기타"),
+    "집" to listOf("청소", "정리", "요리", "휴식", "수리", "가구", "기타"),
+    "취미" to listOf("게임", "독서", "영화", "음악", "드라마", "만들기", "기타"),
+    "휴식" to listOf("잠", "멍때림", "산책", "카페", "집", "짧은 쉼", "기타"),
+    "공부" to listOf("강의", "책", "자격증", "언어", "코딩", "복습", "기타"),
+    "이동" to listOf("출근", "퇴근", "운전", "대중교통", "여행", "산책", "기타"),
+    "약속" to listOf("친구", "가족", "회사", "식사", "카페", "모임", "기타"),
+    "생각" to listOf("걱정", "계획", "회고", "아이디어", "결심", "고민", "기타")
+)
 private val ReminderDayOptions = listOf("안 함", "매일", "평일", "주말", "일", "월", "화", "수", "목", "금", "토")
 private val Muted = Color(0xFF897978)
 private val Line = Color(0xFFF0DADA)
@@ -205,7 +223,9 @@ data class Profile(
     val gender: String,
     val age: String,
     val notifyTimes: List<String>,
-    val topics: List<String>
+    val topics: List<String>,
+    val topicDetails: Map<String, List<String>> = emptyMap(),
+    val topicPromptDismissedDay: Int = 0
 )
 
 data class DiaryEntry(
@@ -233,10 +253,18 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
     var profile by remember { mutableStateOf(loadProfile(context)) }
     var launchDone by remember { mutableStateOf(false) }
     var topicFollowUpDismissed by remember { mutableStateOf(false) }
+    var topicFollowUpStage by remember { mutableStateOf("prompt") }
+    var topicDetailStage by remember { mutableStateOf("prompt") }
     val entries = remember { mutableStateListOf<DiaryEntry>().also { it.addAll(loadEntries(context)) } }
     val followUpTopics = remember(profile?.topics) { mutableStateListOf<String>().also { it.addAll(profile?.topics.orEmpty()) } }
+    val pendingDetailTopic = profile?.topics?.firstOrNull { profile?.topicDetails?.get(it).isNullOrEmpty() }
+    val detailSelections = remember(pendingDetailTopic) { mutableStateListOf<String>() }
     val recordedDays = entries.map { it.date }.toSet().size
-    val shouldShowTopicFollowUp = profile != null && launchDone && profile!!.topics.isEmpty() && recordedDays >= 3 && !topicFollowUpDismissed
+    val completedDetailCount = profile?.topicDetails?.count { it.value.isNotEmpty() } ?: 0
+    val nextDetailDay = 3 + completedDetailCount * 2
+    val canShowTopicPrompt = profile != null && launchDone && recordedDays >= 3 && recordedDays >= profile!!.topicPromptDismissedDay + 2
+    val shouldShowTopicFollowUp = canShowTopicPrompt && profile!!.topics.isEmpty() && !topicFollowUpDismissed
+    val shouldShowTopicDetailFollowUp = canShowTopicPrompt && profile!!.topics.isNotEmpty() && pendingDetailTopic != null && recordedDays >= nextDetailDay
 
     LaunchedEffect(profile?.notifyTimes) {
         profile?.let { scheduleDiaryReminders(context, it.notifyTimes) }
@@ -252,13 +280,68 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
     } else if (!launchDone) {
         SplashScreen { launchDone = true }
     } else if (shouldShowTopicFollowUp) {
-        TopicScreen(followUpTopics) {
-            if (followUpTopics.isNotEmpty()) {
-                val savedProfile = profile!!.copy(topics = followUpTopics.distinct())
+        if (topicFollowUpStage == "select") {
+            TopicScreen(followUpTopics) {
+                val savedProfile = if (followUpTopics.isNotEmpty()) {
+                    profile!!.copy(topics = followUpTopics.distinct(), topicPromptDismissedDay = 0)
+                } else {
+                    profile!!.copy(topicPromptDismissedDay = recordedDays)
+                }
                 profile = savedProfile
                 saveProfile(context, savedProfile)
+                topicFollowUpDismissed = true
+                topicFollowUpStage = "prompt"
             }
-            topicFollowUpDismissed = true
+        } else {
+            TopicNudgeScreen(
+                title = "자주 남기고 싶은 걸 골라볼까요?",
+                subtitle = "질문을 조금 더 자연스럽게 고르는 데 도움이 돼요.",
+                positiveText = "골라볼게요",
+                negativeText = "다음에 할게요",
+                onPositive = { topicFollowUpStage = "select" },
+                onNegative = {
+                    val savedProfile = profile!!.copy(topicPromptDismissedDay = recordedDays)
+                    profile = savedProfile
+                    saveProfile(context, savedProfile)
+                    topicFollowUpDismissed = true
+                }
+            )
+        }
+    } else if (shouldShowTopicDetailFollowUp) {
+        val topic = pendingDetailTopic.orEmpty()
+        if (topicDetailStage == "select") {
+            TopicDetailScreen(
+                topic = topic,
+                selectedDetails = detailSelections,
+                onNext = {
+                    val updatedDetails = profile!!.topicDetails.toMutableMap()
+                    updatedDetails[topic] = detailSelections.distinct()
+                    val savedProfile = profile!!.copy(topicDetails = updatedDetails, topicPromptDismissedDay = 0)
+                    profile = savedProfile
+                    saveProfile(context, savedProfile)
+                    topicDetailStage = "prompt"
+                },
+                onSkip = {
+                    val savedProfile = profile!!.copy(topicPromptDismissedDay = recordedDays)
+                    profile = savedProfile
+                    saveProfile(context, savedProfile)
+                    topicDetailStage = "prompt"
+                }
+            )
+        } else {
+            TopicNudgeScreen(
+                title = "${topic} 이야기를 조금 더 나눠볼까요?",
+                subtitle = "한 가지만 더 골라두면 다음 질문이 덜 엉뚱해져요.",
+                positiveText = "골라볼게요",
+                negativeText = "다음에 할게요",
+                onPositive = { topicDetailStage = "select" },
+                onNegative = {
+                    val savedProfile = profile!!.copy(topicPromptDismissedDay = recordedDays)
+                    profile = savedProfile
+                    saveProfile(context, savedProfile)
+                    topicDetailStage = "prompt"
+                }
+            )
         }
     } else {
         MainTabs(
@@ -286,11 +369,12 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
                 profile = null
                 launchDone = false
                 topicFollowUpDismissed = false
+                topicFollowUpStage = "prompt"
+                topicDetailStage = "prompt"
             }
         )
     }
 }
-
 
 @Composable
 fun OnboardingFlow(onComplete: (Profile) -> Unit) {
@@ -475,6 +559,51 @@ fun TopicScreen(selectedTopics: MutableList<String>, onNext: () -> Unit) {
     }
 }
 
+@Composable
+fun TopicNudgeScreen(
+    title: String,
+    subtitle: String,
+    positiveText: String,
+    negativeText: String,
+    onPositive: () -> Unit,
+    onNegative: () -> Unit
+) {
+    OnboardingShell(title, subtitle) {
+        PrimaryButton(positiveText, onClick = onPositive)
+        OutlinedSoftButton(negativeText, onClick = onNegative)
+    }
+}
+
+@Composable
+fun TopicDetailScreen(
+    topic: String,
+    selectedDetails: MutableList<String>,
+    onNext: () -> Unit,
+    onSkip: () -> Unit
+) {
+    val detailOptions = detailOptionsFor(topic)
+    OnboardingShell("${topic} 중에서 자주 남기고 싶은 건요?", "하나만 골라도 괜찮아요. 나중에 또 바꿀 수 있어요.") {
+        Text("중복 선택 가능", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.align(Alignment.End))
+        detailOptions.chunked(2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                row.forEach { detail ->
+                    PillButton(detail, detail in selectedDetails, Modifier.weight(1f)) {
+                        if (detail in selectedDetails) selectedDetails.remove(detail) else selectedDetails.add(detail)
+                    }
+                }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+        PrimaryButton("다음", enabled = selectedDetails.isNotEmpty(), onClick = onNext)
+        TextButton(onClick = onSkip, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+            Text("다음에 할게요", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f))
+        }
+    }
+}
+
+fun detailOptionsFor(topic: String): List<String> {
+    return TopicDetailOptions[topic] ?: listOf("자주 있는 일", "가끔 있는 일", "기록하고 싶은 일", "기타")
+}
 @Composable
 fun NotificationScreen(notifyTimes: MutableList<String>, onComplete: () -> Unit) {
     var period by remember { mutableStateOf("오후") }
@@ -1586,6 +1715,9 @@ suspend fun fetchAiQuestion(
                     .put("age", profile.age)
                     .put("gender", profile.gender)
                     .put("topics", JSONArray(profile.topics))
+                    .put("topicDetails", JSONObject().also { details ->
+                        profile.topicDetails.forEach { (topic, values) -> details.put(topic, JSONArray(values)) }
+                    })
                 )
                 .put("previousAnswers", JSONArray(previousAnswers))
                 .put("recentEntries", JSONArray(entries.takeLast(3).map { it.text }))
@@ -2014,14 +2146,4 @@ fun saveEntries(context: Context, entries: List<DiaryEntry>) {
     }
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("entries", array.toString()).apply()
 }
-
-
-
-
-
-
-
-
-
-
 
