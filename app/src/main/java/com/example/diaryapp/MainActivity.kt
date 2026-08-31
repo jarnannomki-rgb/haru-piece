@@ -9,7 +9,6 @@ import android.net.Uri
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
@@ -67,6 +66,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -96,27 +96,19 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
-import java.net.HttpURLConnection
-import java.net.URL
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 
 private const val PREFS_NAME = "haru_piece_prefs"
-private val QUESTION_FUNCTION_URL = BuildConfig.QUESTION_FUNCTION_URL
-private val SENTENCE_FUNCTION_URL = BuildConfig.SENTENCE_FUNCTION_URL
-private const val AI_LOG_TAG = "HaruAi"
-private val DateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy.MM.dd")
-private val TimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+val DateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy.MM.dd")
+val TimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
 private val Blush = Color(0xFFFFEEEE)
 private val Coral = Color(0xFFEF8585)
@@ -240,13 +232,22 @@ data class DiaryEntry(
 
 data class AnswerOption(
     val label: String,
-    val sentence: String
+    val sentence: String,
+    val nextGroupKey: String? = null,
+    val value: String? = null
 )
 
 data class Question(
     val title: String,
     val options: List<AnswerOption>,
-    val category: String = ""
+    val category: String = "",
+    val key: String = "",
+    val groupKey: String = "",
+    val depthLevel: Int = 1,
+    val customAnswerType: String = "activity",
+    val defaultNextGroupKey: String? = null,
+    val cooldownDays: Int = 3,
+    val weight: Int = 100
 )
 
 @Composable
@@ -730,10 +731,11 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     var recordDate by remember { mutableStateOf(LocalDate.now()) }
     var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
     var showResetConfirm by remember { mutableStateOf(false) }
-    val aiQuestions = remember { mutableStateListOf<Question>() }
-    var aiLoading by remember { mutableStateOf(false) }
-    var sentenceLoading by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
+    var showCustomInputWarning by remember { mutableStateOf(false) }
+    val dbQuestions = remember { mutableStateMapOf<Int, Question>() }
+    val missedDbRequests = remember { mutableStateListOf<String>() }
+    var questionLoading by remember { mutableStateOf(false) }
+    var nextGroupKey by remember { mutableStateOf<String?>(null) }
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             selectedPhotoUri = savePhotoToAppStorage(context, uri) ?: uri.toString()
@@ -746,25 +748,20 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         else -> 1
     }
     val localQuestions = buildQuestions(profile, questionLimit, recordDate, entries, answers.toList())
-    val currentQuestion = aiQuestions.getOrNull(questionIndex) ?: localQuestions[questionIndex]
+    val currentQuestion = dbQuestions[questionIndex] ?: localQuestions[questionIndex]
 
-    fun finishWithAi(nextAnswers: List<String>) {
-        val fallbackDraft = makeDiaryText(nextAnswers)
-        draft = fallbackDraft
+    fun finishNormally(nextAnswers: List<String>) {
+        draft = makeDiaryText(nextAnswers)
         mode = "review"
-        sentenceLoading = true
-        coroutineScope.launch {
-            val aiDraft = fetchAiDiarySentence(profile, entries, recordDate, nextAnswers, fallbackDraft)
-            if (!aiDraft.isNullOrBlank()) draft = aiDraft
-            sentenceLoading = false
-        }
     }
 
-    fun submitAnswer(answer: String) {
-        answers.add(answer)
+    fun submitAnswer(option: AnswerOption) {
+        answers.add(polishDiaryText(option.sentence))
+        nextGroupKey = option.nextGroupKey ?: currentQuestion.defaultNextGroupKey
         if (questionIndex + 1 >= questionLimit) {
-            finishWithAi(answers.toList())
+            finishNormally(answers.toList())
         } else {
+            customInput = ""
             questionIndex += 1
         }
     }
@@ -772,25 +769,37 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     fun submitCustomAnswer() {
         val input = customInput.trim()
         if (input.isBlank()) return
-        val answer = sentenceFromCustomAnswer(input, currentQuestion)
-        submitAnswer(answer)
+        if (DiarySentenceEngine.looksSuspicious(input)) {
+            showCustomInputWarning = true
+            return
+        }
+        answers.add(sentenceFromCustomAnswer(input, currentQuestion))
+        nextGroupKey = currentQuestion.defaultNextGroupKey
         customInput = ""
         keyboardController?.hide()
         focusManager.clearFocus()
-    }
-
-    LaunchedEffect(mode, questionIndex, recordDate, answers.size) {
-        if (mode == "question" && questionIndex == 0 && aiQuestions.getOrNull(questionIndex) == null && !aiLoading) {
-            aiLoading = true
-            val aiQuestion = fetchAiQuestion(profile, entries, recordDate, questionIndex + 1, answers.toList(), questionLimit)
-            if (aiQuestion != null && shouldUseAiQuestion(aiQuestion, entries, recordDate, questionIndex + 1)) {
-                while (aiQuestions.size <= questionIndex) aiQuestions.add(localQuestions[aiQuestions.size])
-                aiQuestions[questionIndex] = aiQuestion
-            }
-            aiLoading = false
+        if (questionIndex + 1 >= questionLimit) {
+            finishNormally(answers.toList())
+        } else {
+            questionIndex += 1
         }
     }
 
+    LaunchedEffect(mode, questionIndex, recordDate, nextGroupKey, entries.size) {
+        if (mode == "question" && dbQuestions[questionIndex] == null && !questionLoading) {
+            val requestKey = listOf(recordDate.format(DateFormatter), questionIndex.toString(), nextGroupKey ?: "start", entries.size.toString()).joinToString("|")
+            if (!missedDbRequests.contains(requestKey)) {
+                questionLoading = true
+                val dbQuestion = fetchDbQuestion(profile, entries, recordDate, questionIndex + 1, questionLimit, nextGroupKey)
+                if (dbQuestion != null) {
+                    dbQuestions[questionIndex] = dbQuestion
+                } else {
+                    missedDbRequests.add(requestKey)
+                }
+                questionLoading = false
+            }
+        }
+    }
     if (showResetConfirm) {
         AlertDialog(
             onDismissRequest = { showResetConfirm = false },
@@ -808,6 +817,17 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         )
     }
 
+
+    if (showCustomInputWarning) {
+        AlertDialog(
+            onDismissRequest = { showCustomInputWarning = false },
+            title = { Text("입력이 조금 이상해요") },
+            text = { Text("오타가 섞인 것 같아요. 다시 한 번만 확인해주세요.") },
+            confirmButton = {
+                TextButton(onClick = { showCustomInputWarning = false }) { Text("확인", color = MaterialTheme.colorScheme.primary) }
+            }
+        )
+    }
     AppScreen("하루조각", recordDate.format(DateFormatter)) {
         when (mode) {
             "start" -> WhitePanel {
@@ -818,7 +838,9 @@ TestDatePicker(recordDate, { recordDate = it })
                     questionIndex = 0
                     customInput = ""
                     selectedPhotoUri = null
-                    aiQuestions.clear()
+                    dbQuestions.clear()
+                    missedDbRequests.clear()
+                    nextGroupKey = null
                     mode = "question"
                 }
                 OutlinedSoftButton("오늘은 쉴게요") {
@@ -833,7 +855,7 @@ TestDatePicker(recordDate, { recordDate = it })
                 Text("${questionIndex + 1} / $questionLimit", color = CoralDark, fontWeight = FontWeight.Bold)
                 Text(currentQuestion.title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
                 currentQuestion.options.forEach { option ->
-                    OutlinedSoftButton(option.label) { submitAnswer(option.sentence) }
+                    OutlinedSoftButton(option.label) { submitAnswer(option) }
                 }
                 HaruTextField(
                     value = customInput,
@@ -851,7 +873,9 @@ TestDatePicker(recordDate, { recordDate = it })
                         focusManager.clearFocus()
                         answers.clear()
                         customInput = ""
-                        aiQuestions.clear()
+                        dbQuestions.clear()
+                        missedDbRequests.clear()
+                        nextGroupKey = null
                         questionIndex = 0
                         mode = "start"
                     },
@@ -860,14 +884,13 @@ TestDatePicker(recordDate, { recordDate = it })
                     Text("취소", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f))
                 }
                 if (questionIndex > 0) {
-                    TextButton(onClick = { finishWithAi(answers.toList()) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                    TextButton(onClick = { finishNormally(answers.toList()) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                         Text("여기까지", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
             "review" -> WhitePanel {
                 Text("오늘의 조각", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                if (sentenceLoading) Text("문장을 정리하고 있어요.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 HaruTextField(
                     value = draft,
                     onValueChange = { draft = it },
@@ -1770,155 +1793,6 @@ fun MiniPieceCluster() {
     }
 }
 
-suspend fun fetchAiQuestion(
-    profile: Profile,
-    entries: List<DiaryEntry>,
-    recordDate: LocalDate,
-    step: Int,
-    previousAnswers: List<String>,
-    questionLimit: Int
-): Question? = withTimeoutOrNull(15000) {
-    withContext(Dispatchers.IO) {
-        runCatching {
-            Log.i(AI_LOG_TAG, "AI request start: step=$step, records=${entries.size}")
-            val payload = JSONObject()
-                .put("appDay", entries.map { it.date }.toSet().size + 1)
-                .put("recordCount", entries.size)
-                .put("recordDate", recordDate.format(DateFormatter))
-                .put("notificationTime", LocalTime.now().format(TimeFormatter))
-                .put("currentStep", step)
-                .put("questionLimit", questionLimit)
-                .put("rotationSeed", "${recordDate.dayOfYear}-${entries.size}-$step")
-                .put("weekday", recordDate.dayOfWeek.toString())
-                .put("avoidCategories", JSONArray(inferRecentCategories(entries)))
-                .put("questionStyle", "초반은 식사, 수면, 컨디션, 오늘 한 일처럼 가볍고 사실적인 질문을 우선한다. 직전 소재와 같은 카테고리는 가능하면 피한다.")
-                .put("profile", JSONObject()
-                    .put("age", profile.age)
-                    .put("gender", profile.gender)
-                    .put("topics", JSONArray(profile.topics))
-                    .put("topicDetails", JSONObject().also { details ->
-                        profile.topicDetails.forEach { (topic, values) -> details.put(topic, JSONArray(values)) }
-                    })
-                )
-                .put("previousAnswers", JSONArray(previousAnswers))
-                .put("recentEntries", JSONArray(entries.takeLast(3).map { it.text }))
-            Log.i(AI_LOG_TAG, "AI payload=${payload.toString().take(220)}")
-
-            val connection = (URL(QUESTION_FUNCTION_URL).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 5000
-                readTimeout = 15000
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-            }
-
-            connection.outputStream.use { stream ->
-                stream.write(payload.toString().toByteArray(Charsets.UTF_8))
-            }
-
-            val status = connection.responseCode
-            val responseText = if (status in 200..299) {
-                connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            } else {
-                connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            }
-            Log.i(AI_LOG_TAG, "AI response status=$status body=${responseText.take(220)}")
-            connection.disconnect()
-
-            if (responseText.isBlank()) return@runCatching null
-            val wrapper = JSONObject(responseText)
-            val raw = wrapper.optString("raw")
-            Log.i(AI_LOG_TAG, "AI raw=${raw.take(220)}")
-            parseAiQuestion(raw)
-        }.onFailure { Log.w(AI_LOG_TAG, "AI request failed", it) }.getOrNull()
-    }
-}
-
-
-suspend fun fetchAiDiarySentence(
-    profile: Profile,
-    entries: List<DiaryEntry>,
-    recordDate: LocalDate,
-    answers: List<String>,
-    fallbackDraft: String
-): String? = withTimeoutOrNull(12000) {
-    withContext(Dispatchers.IO) {
-        runCatching {
-            val payload = JSONObject()
-                .put("recordDate", recordDate.format(DateFormatter))
-                .put("answers", JSONArray(answers))
-                .put("fallbackDraft", fallbackDraft)
-                .put("profile", JSONObject()
-                    .put("age", profile.age)
-                    .put("gender", profile.gender)
-                    .put("topics", JSONArray(profile.topics))
-                    .put("topicDetails", JSONObject().also { details ->
-                        profile.topicDetails.forEach { (topic, values) -> details.put(topic, JSONArray(values)) }
-                    })
-                )
-                .put("recentEntries", JSONArray(entries.takeLast(5).map { it.text }))
-
-            val connection = (URL(SENTENCE_FUNCTION_URL).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 5000
-                readTimeout = 12000
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-            }
-
-            connection.outputStream.use { stream ->
-                stream.write(payload.toString().toByteArray(Charsets.UTF_8))
-            }
-
-            val status = connection.responseCode
-            val responseText = if (status in 200..299) {
-                connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            } else {
-                connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            }
-            Log.i(AI_LOG_TAG, "AI sentence status=$status body=${responseText.take(220)}")
-            connection.disconnect()
-            if (status !in 200..299 || responseText.isBlank()) return@runCatching null
-
-            val wrapper = JSONObject(responseText)
-            val direct = wrapper.optString("sentence")
-            val raw = wrapper.optString("raw")
-            val sentence = direct.ifBlank {
-                raw.takeIf { it.isNotBlank() }?.let { rawText ->
-                    runCatching {
-                        JSONObject(rawText.replace("```json", "").replace("```", "").trim()).optString("sentence")
-                    }.getOrNull()
-                }.orEmpty()
-            }
-            sentence.takeIf { it.isNotBlank() }?.let(::polishDiaryText)
-        }.onFailure { Log.w(AI_LOG_TAG, "AI sentence request failed", it) }.getOrNull()
-    }
-}
-fun parseAiQuestion(raw: String): Question? {
-    val jsonText = raw
-        .replace("```json", "")
-        .replace("```", "")
-        .trim()
-    if (jsonText.isBlank()) return null
-
-    return runCatching {
-        val json = JSONObject(jsonText)
-        val optionsJson = json.getJSONArray("options")
-        val options = List(optionsJson.length()) { index ->
-            val option = optionsJson.getJSONObject(index)
-            AnswerOption(
-                label = option.optString("label"),
-                sentence = option.optString("sentence")
-            )
-        }.filter { it.label.isNotBlank() && it.sentence.isNotBlank() }
-
-        if (options.isEmpty()) null else Question(
-            title = json.getString("question"),
-            options = options,
-            category = json.optString("category").ifBlank { inferQuestionCategory(json.getString("question") + " " + options.joinToString(" ") { it.label }) }
-        )
-    }.getOrNull()
-}
 fun inferRecentCategories(entries: List<DiaryEntry>): List<String> {
     val recentText = entries.takeLast(3).joinToString(" ") { it.text }
     val categories = mutableListOf<String>()
@@ -1950,13 +1824,6 @@ fun inferQuestionCategory(text: String): String {
     }
 }
 
-fun shouldUseAiQuestion(question: Question, entries: List<DiaryEntry>, recordDate: LocalDate, step: Int): Boolean {
-    if (step != 1) return true
-    val category = question.category.ifBlank { inferQuestionCategory(question.title) }
-    val todayCategories = inferRecentCategories(entries.filter { it.date == recordDate.format(DateFormatter) }).toSet()
-    val recentCategories = inferRecentCategories(entries.takeLast(3)).toSet()
-    return category !in todayCategories && (recentCategories.size >= 4 || category !in recentCategories)
-}
 fun buildQuestions(profile: Profile, limit: Int, date: LocalDate = LocalDate.now(), entries: List<DiaryEntry> = emptyList(), answers: List<String> = emptyList()): List<Question> {
     val firstQuestions = listOf(
         Question(
@@ -2136,165 +2003,11 @@ fun nextFocusQuestionFor(category: String): Question {
     )
 }
 
-fun polishDiaryText(raw: String): String {
-    var text = raw.trim()
-        .replace(Regex("오늘은\\s+오늘은"), "오늘은")
-        .replace(Regex("오늘은\\s+(.+?)\\s+하루였다\\.?$")) { match ->
-            val middle = match.groupValues[1]
-            if (middle.endsWith("했다") || middle.endsWith("먹었다") || middle.endsWith("잤다") || middle.endsWith("있었다")) {
-                "오늘은 $middle"
-            } else {
-                match.value
-            }
-        }
-        .replace("힘들어 하루였다", "힘든 하루였다")
-        .replace("좋아 하루였다", "좋은 하루였다")
-        .replace("나빠 하루였다", "좋지 않은 하루였다")
-        .replace("괜찮아 하루였다", "괜찮은 하루였다")
-        .replace("피곤해 하루였다", "피곤한 하루였다")
-        .replace("무거워 하루였다", "몸이 무거운 하루였다")
-        .replace("오늘은 컨디션이 힘들어", "오늘은 컨디션이 좋지 않아")
-        .replace("오늘은 기분이 좋아", "오늘은 기분이 좋았다")
-        .replace("오늘은 날씨가 좋아", "오늘은 날씨가 좋았다")
-        .replace("오늘은 날씨가 좋은 하루였다", "오늘은 날씨가 좋았다")
-        .replace("오늘은 기분이 좋은 하루였다", "오늘은 기분이 좋았다")
-        .replace("오늘은 컨디션이 힘든 하루였다", "오늘은 컨디션이 좋지 않았다")
+fun polishDiaryText(raw: String): String = DiarySentenceEngine.polish(raw)
 
-    text = text.replace(Regex("\\s+"), " ").trim()
-    return if (text.isBlank()) "오늘은 조용히 지나간 하루였다." else text.ensurePeriod()
-}
+fun sentenceFromCustomAnswer(answer: String, question: Question): String = DiarySentenceEngine.fromCustomAnswer(answer, question)
 
-fun sentenceFromCustomAnswer(answer: String, question: Question): String {
-    val category = question.category.ifBlank { inferQuestionCategory(question.title) }
-    val phrase = normalizeKoreanDiaryPhrase(answer)
-    if (looksLikeCompleteSentence(phrase)) {
-        val sentence = if (phrase.startsWith("오늘") || phrase.startsWith("나는")) phrase else "오늘은 $phrase"
-        return polishDiaryText(sentence)
-    }
-
-    return when (category) {
-        "식사" -> mealSentenceFromPhrase(phrase)
-        "컨디션" -> stateSentenceFromPhrase("컨디션", phrase)
-        "날씨" -> weatherSentenceFromPhrase(phrase)
-        "기분" -> stateSentenceFromPhrase("기분", phrase)
-        "수면" -> sleepSentenceFromPhrase(phrase)
-        "이동" -> activitySentenceFromPhrase(phrase)
-        else -> activitySentenceFromPhrase(phrase)
-    }.let(::polishDiaryText)
-}
-
-fun mealSentenceFromPhrase(phrase: String): String {
-    return if (listOf("먹", "마셨", "마시", "챙", "해결").any { phrase.contains(it) }) {
-        "오늘은 $phrase"
-    } else {
-        "오늘은 ${phrase.withObjectParticle()} 먹었다"
-    }
-}
-
-fun weatherSentenceFromPhrase(phrase: String): String {
-    val state = normalizeStateWord(phrase)
-    return when {
-        phrase.contains("날씨") -> "오늘은 $state"
-        state == "비가 왔다" || state == "눈이 왔다" -> "오늘은 $state"
-        else -> "오늘은 날씨가 $state"
-    }
-}
-
-fun stateSentenceFromPhrase(subject: String, phrase: String): String {
-    val state = normalizeStateWord(phrase)
-    return if (phrase.contains(subject)) "오늘은 $state" else "오늘은 ${subject}이 $state"
-}
-
-fun sleepSentenceFromPhrase(phrase: String): String {
-    return when {
-        phrase in listOf("잠", "잠자기", "잠을 잤다", "잤다") -> "오늘은 잠을 잤다"
-        phrase.contains("잤") -> "오늘은 잠을 $phrase"
-        phrase.contains("잠") -> "오늘은 $phrase"
-        else -> "오늘은 잠이 ${normalizeStateWord(phrase)}"
-    }
-}
-
-fun activitySentenceFromPhrase(phrase: String): String {
-    val cleaned = phrase.trim()
-    val mapped = when (cleaned) {
-        "잠", "잠자기" -> "잠을 잤다"
-        "휴식", "쉬기" -> "쉬는 시간을 가졌다"
-        "청소" -> "청소를 했다"
-        "운전" -> "운전을 했다"
-        "회의" -> "회의를 했다"
-        "산책" -> "산책을 했다"
-        "공부" -> "공부를 했다"
-        "운동" -> "운동을 했다"
-        "이동" -> "이동하는 시간이 있었다"
-        else -> null
-    }
-    if (mapped != null) return "오늘은 $mapped"
-    if (looksLikeCompleteSentence(cleaned)) return cleaned
-    if (cleaned.endsWith("했다") || cleaned.endsWith("갔다") || cleaned.endsWith("왔다") || cleaned.endsWith("먹었다") || cleaned.endsWith("잤다")) {
-        return "오늘은 $cleaned"
-    }
-    if (cleaned.endsWith("기") && cleaned.length > 1) {
-        val noun = cleaned.dropLast(1)
-        return "오늘은 ${noun.withObjectParticle()} 했다"
-    }
-    return "오늘은 ${cleaned.withObjectParticle()} 했다"
-}
-
-fun normalizeStateWord(phrase: String): String {
-    return when (phrase.trim()) {
-        "좋아", "좋음", "좋았음" -> "좋았다"
-        "안 좋아", "안좋아", "나빠", "나쁨" -> "좋지 않았다"
-        "괜찮아", "괜찮음" -> "괜찮았다"
-        "피곤해", "피곤함" -> "피곤했다"
-        "힘들어", "힘듦" -> "힘들었다"
-        "무거워", "무거움" -> "무거웠다"
-        "맑아", "맑음" -> "맑았다"
-        "흐려", "흐림" -> "흐렸다"
-        "더워", "더움" -> "더웠다"
-        "추워", "추움" -> "추웠다"
-        "비", "비옴", "비가 왔음" -> "비가 왔다"
-        "눈", "눈옴", "눈이 왔음" -> "눈이 왔다"
-        else -> phrase
-    }
-}
-
-fun normalizeKoreanDiaryPhrase(raw: String): String {
-    val text = raw.trim().trimEnd('.', '!', '?')
-    fun replaceEnding(suffix: String, replacement: String): String? {
-        return if (text.endsWith(suffix)) text.dropLast(suffix.length) + replacement else null
-    }
-    return replaceEnding("이었어요", "이었다")
-        ?: replaceEnding("였어요", "였다")
-        ?: replaceEnding("했어요", "했다")
-        ?: replaceEnding("됐어요", "됐다")
-        ?: replaceEnding("었어요", "었다")
-        ?: replaceEnding("았어요", "았다")
-        ?: replaceEnding("예요", "이다")
-        ?: replaceEnding("이에요", "이다")
-        ?: replaceEnding("어요", "었다")
-        ?: replaceEnding("아요", "았다")
-        ?: if (text.endsWith("요")) text.dropLast(1) else text
-}
-
-fun String.withObjectParticle(): String {
-    val value = trim()
-    if (value.isBlank()) return value
-    val last = value.last()
-    val hasBatchim = last in '가'..'힣' && ((last.code - '가'.code) % 28 != 0)
-    return value + if (hasBatchim) "을" else "를"
-}
-
-fun makeDiaryText(answers: List<String>): String {
-    if (answers.isEmpty()) return "오늘은 조용히 지나간 하루였다."
-    val cleaned = answers.map { polishDiaryText(it.trim()) }.filter { it.isNotBlank() }
-    return cleaned.joinToString(" ") { it.ensurePeriod() }
-}
-fun looksLikeCompleteSentence(value: String): Boolean {
-    val text = value.trim().trimEnd('.', '!', '?')
-    return text.endsWith("다") || text.endsWith("했다") || text.endsWith("먹었다") || text.endsWith("보냈다")
-}
-
-
+fun makeDiaryText(answers: List<String>): String = DiarySentenceEngine.combine(answers)
 fun String.ensurePeriod(): String {
     val value = trim()
     return if (value.endsWith(".") || value.endsWith("!") || value.endsWith("?")) value else "$value."
@@ -2386,4 +2099,9 @@ fun saveEntries(context: Context, entries: List<DiaryEntry>) {
     }
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("entries", array.toString()).apply()
 }
+
+
+
+
+
 
