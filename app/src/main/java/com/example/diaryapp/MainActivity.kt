@@ -733,6 +733,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     var showResetConfirm by remember { mutableStateOf(false) }
     var showCustomInputWarning by remember { mutableStateOf(false) }
     val dbQuestions = remember { mutableStateMapOf<Int, Question>() }
+    val resolvedQuestions = remember { mutableStateMapOf<Int, Boolean>() }
     val missedDbRequests = remember { mutableStateListOf<String>() }
     var questionLoading by remember { mutableStateOf(false) }
     var nextGroupKey by remember { mutableStateOf<String?>(null) }
@@ -748,7 +749,11 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         else -> 1
     }
     val localQuestions = buildQuestions(profile, questionLimit, recordDate, entries, answers.toList())
-    val currentQuestion = dbQuestions[questionIndex] ?: localQuestions[questionIndex]
+    val currentQuestion = if (resolvedQuestions[questionIndex] == true) {
+        dbQuestions[questionIndex] ?: localQuestions[questionIndex]
+    } else {
+        null
+    }
 
     fun finishNormally(nextAnswers: List<String>) {
         draft = makeDiaryText(nextAnswers)
@@ -756,8 +761,9 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     }
 
     fun submitAnswer(option: AnswerOption) {
+        val question = currentQuestion ?: return
         answers.add(polishDiaryText(option.sentence))
-        nextGroupKey = option.nextGroupKey ?: currentQuestion.defaultNextGroupKey
+        nextGroupKey = option.nextGroupKey ?: question.defaultNextGroupKey
         if (questionIndex + 1 >= questionLimit) {
             finishNormally(answers.toList())
         } else {
@@ -773,8 +779,9 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
             showCustomInputWarning = true
             return
         }
-        answers.add(sentenceFromCustomAnswer(input, currentQuestion))
-        nextGroupKey = currentQuestion.defaultNextGroupKey
+        val question = currentQuestion ?: return
+        answers.add(sentenceFromCustomAnswer(input, question))
+        nextGroupKey = question.defaultNextGroupKey
         customInput = ""
         keyboardController?.hide()
         focusManager.clearFocus()
@@ -786,18 +793,19 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     }
 
     LaunchedEffect(mode, questionIndex, recordDate, nextGroupKey, entries.size) {
-        if (mode == "question" && dbQuestions[questionIndex] == null && !questionLoading) {
+        if (mode == "question" && resolvedQuestions[questionIndex] != true && !questionLoading) {
             val requestKey = listOf(recordDate.format(DateFormatter), questionIndex.toString(), nextGroupKey ?: "start", entries.size.toString()).joinToString("|")
+            questionLoading = true
             if (!missedDbRequests.contains(requestKey)) {
-                questionLoading = true
                 val dbQuestion = fetchDbQuestion(profile, entries, recordDate, questionIndex + 1, questionLimit, nextGroupKey)
                 if (dbQuestion != null) {
                     dbQuestions[questionIndex] = dbQuestion
                 } else {
                     missedDbRequests.add(requestKey)
                 }
-                questionLoading = false
             }
+            resolvedQuestions[questionIndex] = true
+            questionLoading = false
         }
     }
     if (showResetConfirm) {
@@ -839,6 +847,7 @@ TestDatePicker(recordDate, { recordDate = it })
                     customInput = ""
                     selectedPhotoUri = null
                     dbQuestions.clear()
+                    resolvedQuestions.clear()
                     missedDbRequests.clear()
                     nextGroupKey = null
                     mode = "question"
@@ -853,19 +862,25 @@ TestDatePicker(recordDate, { recordDate = it })
             }
             "question" -> WhitePanel {
                 Text("${questionIndex + 1} / $questionLimit", color = CoralDark, fontWeight = FontWeight.Bold)
-                Text(currentQuestion.title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
-                currentQuestion.options.forEach { option ->
-                    OutlinedSoftButton(option.label) { submitAnswer(option) }
-                }
-                HaruTextField(
-                    value = customInput,
-                    onValueChange = { customInput = it },
-                    label = "기타(입력)",
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { submitCustomAnswer() })
-                )
-                PrimaryButton("기타로 남기기", enabled = customInput.isNotBlank()) {
-                    submitCustomAnswer()
+                val question = currentQuestion
+                if (question == null) {
+                    Text("질문을 준비하고 있어요", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
+                    Text("잠시만 기다려주세요.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text(question.title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
+                    question.options.forEach { option ->
+                        OutlinedSoftButton(option.label) { submitAnswer(option) }
+                    }
+                    HaruTextField(
+                        value = customInput,
+                        onValueChange = { customInput = it },
+                        label = "기타(입력)",
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { submitCustomAnswer() })
+                    )
+                    PrimaryButton("기타로 남기기", enabled = customInput.isNotBlank()) {
+                        submitCustomAnswer()
+                    }
                 }
                 TextButton(
                     onClick = {
@@ -874,6 +889,7 @@ TestDatePicker(recordDate, { recordDate = it })
                         answers.clear()
                         customInput = ""
                         dbQuestions.clear()
+                        resolvedQuestions.clear()
                         missedDbRequests.clear()
                         nextGroupKey = null
                         questionIndex = 0
