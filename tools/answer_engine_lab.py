@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 try:
+    sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
@@ -160,9 +161,12 @@ def from_custom_answer(raw_answer: str, question: Question) -> str:
     if not input_text:
         return "오늘은 아무것도 남기지 않은 하루였다."
 
-    phrase = normalize_polite_ending(input_text)
+    phrase = strip_leading_self(normalize_polite_ending(input_text))
+    negative = negative_sentence(phrase, question)
+    if negative:
+        return polish(negative)
     if looks_complete(phrase):
-        return polish(with_today_prefix_if_needed(phrase))
+        return polish(repair_by_question(raw_answer, question, with_today_prefix_if_needed(phrase)))
 
     context = detect_context(phrase, question)
     if context == "reason":
@@ -189,7 +193,56 @@ def from_custom_answer(raw_answer: str, question: Question) -> str:
         sentence = work_sentence(phrase)
     else:
         sentence = activity_sentence(phrase)
-    return polish(sentence)
+    return polish(repair_by_question(raw_answer, question, sentence))
+
+
+def repair_by_question(raw_answer: str, question: Question, sentence: str) -> str:
+    phrase = strip_leading_self(normalize_polite_ending(clean_input(raw_answer)))
+    compact = phrase.replace(" ", "")
+    context = detect_context(phrase, question)
+    state = normalize_state_word(phrase)
+
+    if context == "mood" and "행복" in compact:
+        return f"오늘의 기분은 {state}"
+    if context == "mood" and has_any(state, "좋", "나쁘", "괜찮", "평온", "우울", "그럭", "피곤"):
+        return f"오늘의 기분은 {state}"
+    if context == "condition" and looks_complete(state):
+        return f"오늘은 컨디션이 {state}"
+    if context == "exercise" and has_any(state, "비슷", "많", "적", "평소"):
+        return f"오늘의 활동량은 {state}"
+    if context == "hobby" and compact in {"종이접기", "종이접"}:
+        return "오늘은 종이 접기를 했다"
+    if context == "weather" and sentence.startswith("오늘은 날씨가 오늘"):
+        return f"오늘은 날씨가 {state}"
+    return sentence
+
+
+def negative_sentence(phrase: str, question: Question) -> str | None:
+    compact = phrase.replace(" ", "")
+    if compact not in NEGATIVE_WORDS:
+        return None
+    context = detect_context(phrase, question)
+    return {
+        "food": "오늘은 식사를 따로 남기지 않았다",
+        "drink": "오늘은 따로 마신 것을 남기지 않았다",
+        "sleep": "오늘은 잠에 대해 특별히 남길 내용이 없었다",
+        "weather": "오늘은 날씨에 대해 특별히 남길 내용이 없었다",
+        "mood": "오늘은 기분 변화가 특별히 없었다",
+        "condition": "오늘은 컨디션에 대해 특별히 남길 내용이 없었다",
+        "movement": "오늘은 이동에 대해 특별히 남길 내용이 없었다",
+        "spending": "오늘은 따로 소비한 일이 없었다",
+        "work": "오늘은 일과 관련해 특별히 남길 일이 없었다",
+        "exercise": "오늘은 운동을 따로 하지 않았다",
+        "hobby": "오늘은 취미로 한 일이 없었다",
+        "rest": "오늘은 따로 쉰 시간이 없었다",
+        "study": "오늘은 공부를 따로 하지 않았다",
+        "appointment": "오늘은 약속이 없었다",
+        "family": "오늘은 가족과 관련된 일정이 없었다",
+        "people": "오늘은 사람들과 특별히 남길 일이 없었다",
+        "home": "오늘은 집과 관련해 특별히 남길 일이 없었다",
+        "thought": "오늘은 정리하고 싶은 생각이 특별히 없었다",
+        "reason": "특별한 이유는 없었다",
+    }.get(context, "오늘은 특별히 남길 일이 없었다")
 
 
 def polish(raw: str) -> str:
@@ -229,6 +282,23 @@ def looks_suspicious(raw_answer: str) -> bool:
     return len(compact) >= 2 and not re.search(r"[가-힣A-Za-z0-9]", compact)
 
 
+def looks_suspicious_for_question(raw_answer: str, question: Question) -> bool:
+    if looks_suspicious(raw_answer):
+        return True
+    phrase = strip_leading_self(normalize_polite_ending(clean_input(raw_answer)))
+    compact = phrase.replace(" ", "")
+    if not (2 <= len(compact) <= 4):
+        return False
+    context = detect_context(phrase, question)
+    if context == "weather":
+        return not has_any(compact, "좋", "별로", "맑", "흐", "비", "눈", "더", "추", "바람", "습", "선선", "쌀쌀", "따뜻", "덥", "춥")
+    if context == "mood":
+        return not has_any(compact, "좋", "나쁘", "별로", "행복", "우울", "평온", "그럭", "짜증", "화", "걱정", "괜찮", "기쁨", "슬픔")
+    if context == "condition":
+        return not has_any(compact, "좋", "별로", "피곤", "힘들", "괜찮", "아픔", "아파", "무거", "가벼", "졸림")
+    return False
+
+
 def detect_context(phrase: str, question: Question) -> str:
     title = question.title
     category = question.category
@@ -247,16 +317,32 @@ def detect_context(phrase: str, question: Question) -> str:
         return "food"
     if has_any(title, "식사", "끼니", "점심", "저녁", "아침", "먹") or "food" in answer_type or category == "식사":
         return "food"
-    if has_any(title, "날씨", "하늘", "비", "눈") or "weather" in answer_type or category == "날씨":
+    if has_any(title, "날씨", "하늘", "계절") or "weather" in answer_type or category == "날씨":
         return "weather"
     if has_any(title, "기분", "마음") or "mood" in answer_type or category == "기분":
         return "mood"
-    if has_any(title, "컨디션", "건강", "몸", "피곤") or "condition" in answer_type or category == "건강":
+    if has_any(title, "컨디션", "건강", "몸", "피곤") or "condition" in answer_type or "health" in answer_type or category == "건강":
         return "condition"
     if has_any(title, "이동", "출근", "퇴근", "운전", "길") or "movement" in answer_type or category == "이동":
         return "movement"
     if has_any(title, "소비", "돈", "샀", "지출") or "spending" in answer_type or category == "소비":
         return "spending"
+    if has_any(title, "운동", "움직", "활동량") or "exercise" in answer_type or category == "운동":
+        return "exercise"
+    if has_any(title, "취미") or "hobby" in answer_type or category == "취미":
+        return "hobby"
+    if has_any(title, "휴식", "쉬", "여유") or "rest" in answer_type or category == "휴식":
+        return "rest"
+    if has_any(title, "공부", "학습") or "study" in answer_type or category == "공부":
+        return "study"
+    if has_any(title, "가족") or "family" in answer_type or category == "가족":
+        return "family"
+    if has_any(title, "약속", "일정") or "appointment" in answer_type or category == "약속":
+        return "appointment"
+    if has_any(title, "사람", "대화", "연락") or "people" in answer_type or category == "사람":
+        return "people"
+    if has_any(title, "집", "청소", "정리", "집안") or "home" in answer_type or category == "집":
+        return "home"
     if has_any(title, "일", "업무", "회사") or "work" in answer_type or category == "일":
         return "work"
     return "activity"
@@ -403,6 +489,8 @@ def activity_sentence(phrase: str) -> str:
         "산책": "산책을 했다",
         "독서": "책을 읽었다",
         "공부": "공부를 했다",
+        "종이접기": "종이 접기를 했다",
+        "종이접": "종이 접기를 했다",
     }.get(compact)
     if mapped:
         return f"오늘은 {mapped}"
@@ -417,6 +505,13 @@ def activity_sentence(phrase: str) -> str:
 
 def clean_input(raw: str) -> str:
     return re.sub(r"\s+", " ", raw.strip().rstrip(".!?"))
+
+
+def strip_leading_self(text: str) -> str:
+    for prefix in ("오늘은 ", "오늘 ", "나는 ", "제가 "):
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text.strip()
 
 
 def normalize_polite_ending(text: str) -> str:
@@ -436,6 +531,14 @@ def normalize_polite_ending(text: str) -> str:
         "있어요": "있었다",
         "있어": "있었다",
         "그럭저럭": "그럭저럭이었다",
+        "없었어": "없었다",
+        "없었어요": "없었다",
+        "행복": "행복했다",
+        "늘 행복": "늘 행복했다",
+        "비슷": "평소와 비슷했다",
+        "비슷비슷해": "평소와 비슷했다",
+        "평소와 비슷": "평소와 비슷했다",
+        "평소와 비슷비슷해": "평소와 비슷했다",
     }
     if text in direct:
         return direct[text]
@@ -463,7 +566,9 @@ def normalize_polite_ending(text: str) -> str:
 
 
 def normalize_state_word(phrase: str) -> str:
-    text = phrase.strip()
+    text = phrase.strip().replace(" 모 ", " ").replace("뭐 ", "").strip()
+    if "비슷" in text:
+        return "평소와 비슷했다"
     direct = {
         "좋": "좋았다",
         "좋음": "좋았다",
@@ -500,6 +605,14 @@ def normalize_state_word(phrase: str) -> str:
         "맑았다": "맑았다",
         "흐림": "흐렸다",
         "흐렸다": "흐렸다",
+        "행복": "행복했다",
+        "행복했다": "행복했다",
+        "늘 행복": "늘 행복했다",
+        "늘 행복했다": "늘 행복했다",
+        "비슷": "평소와 비슷했다",
+        "비슷비슷": "평소와 비슷했다",
+        "비슷비슷했다": "평소와 비슷했다",
+        "평소와 비슷했다": "평소와 비슷했다",
     }
     if text in direct:
         return direct[text]
@@ -512,6 +625,9 @@ def normalize_state_word(phrase: str) -> str:
         .replace("괜찮아", "괜찮았다")
         .replace("맑아", "맑았다")
         .replace("흐려", "흐렸다")
+        .replace("행복", "행복했다")
+        .replace("비슷비슷해", "평소와 비슷했다")
+        .replace("비슷해", "평소와 비슷했다")
         .replace("더워", "더웠다")
         .replace("추워", "추웠다")
     )
@@ -623,13 +739,13 @@ def run_lab(args: argparse.Namespace) -> None:
             print(f"전체 {len(questions)}개")
             continue
 
-        suspicious = looks_suspicious(answer)
+        suspicious = looks_suspicious_for_question(answer, q)
         sentence = from_custom_answer(answer, q)
         if suspicious:
             print("오타 의심: 자음/모음만 분리된 입력일 수 있음")
         print(f"결과> {sentence}")
-        review = input("판정(엔터=ok / x=이상함 / 메모)> ").strip()
-        status = "bad" if review.lower() == "x" else "ok" if not review else "memo"
+        review = input("판정(엔터=ok / ㅌ=이상함 / 메모)> ").strip()
+        status = "bad" if review.lower() == "x" or review == "ㅌ" else "ok" if not review else "memo"
         append_log(
             args.log,
             {
@@ -664,6 +780,7 @@ def main() -> None:
 
 SLEEP_WORDS = {"잠", "자기", "잠자기", "수면", "낮잠", "자는 것", "자는거"}
 NO_REASON_WORDS = {"그냥", "없음", "없어", "없어요", "딱히", "특별히없음", "잘모름", "모름"}
+NEGATIVE_WORDS = {"없다", "없었다", "없어", "없었어", "없어요", "없었어요", "없음", "안함", "안했다", "못함", "못했다"}
 
 
 if __name__ == "__main__":

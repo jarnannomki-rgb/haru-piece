@@ -336,7 +336,7 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
         } else {
             TopicNudgeScreen(
                 title = "${topic} 이야기를 조금 더 나눠볼까요?",
-                subtitle = "한 가지만 더 골라두면 다음 질문이 덜 엉뚱해져요.",
+                subtitle = "한 가지만 더 골라두면, 오늘을 남기기 더 쉬워져요.",
                 positiveText = "골라볼게요",
                 negativeText = "다음에 할게요",
                 onPositive = { topicDetailStage = "select" },
@@ -775,11 +775,11 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     fun submitCustomAnswer() {
         val input = customInput.trim()
         if (input.isBlank()) return
-        if (DiarySentenceEngine.looksSuspicious(input)) {
+        val question = currentQuestion ?: return
+        if (DiarySentenceEngine.looksSuspicious(input, question)) {
             showCustomInputWarning = true
             return
         }
-        val question = currentQuestion ?: return
         answers.add(sentenceFromCustomAnswer(input, question))
         nextGroupKey = question.defaultNextGroupKey
         customInput = ""
