@@ -3,9 +3,11 @@ import json
 import random
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 try:
     sys.stdin.reconfigure(encoding="utf-8")
@@ -21,6 +23,15 @@ QUESTION_FILE_NAME = "질문표_2차_질문만_파이프형식_중복제거.txt"
 DEFAULT_PIPE_QUESTIONS = ROOT.parent / QUESTION_FILE_NAME
 LOCAL_PIPE_QUESTIONS = Path(r"D:\\AndroidStudioProjects\\질문표_2차_질문만_파이프형식_중복제거.txt")
 DEFAULT_LOG = ROOT / "answer_engine_lab_log.jsonl"
+DEFAULT_OPTION_CACHE = ROOT / "answer_engine_option_cache.json"
+APP_BUILD_FILE = ROOT / "app" / "build.gradle.kts"
+
+
+@dataclass
+class AnswerOption:
+    label: str
+    sentence: str
+    value: str = ""
 
 
 @dataclass
@@ -31,6 +42,7 @@ class Question:
     depth_level: int = 1
     custom_answer_type: str = "activity"
     source_topic_code: str = ""
+    options: list[AnswerOption] = field(default_factory=list)
 
 
 FALLBACK_QUESTIONS = [
@@ -132,6 +144,115 @@ def load_lab_questions(sql_path: Path, questions_path: Path | None) -> list[Ques
     return load_questions(sql_path)
 
 
+def load_option_cache(path: Path) -> dict[str, list[dict]]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_option_cache(path: Path, cache: dict[str, list[dict]]) -> None:
+    path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_supabase_config() -> tuple[str, str] | None:
+    if not APP_BUILD_FILE.exists():
+        return None
+    text = APP_BUILD_FILE.read_text(encoding="utf-8", errors="replace")
+    url_match = re.search(r'SUPABASE_URL",\s*"\\\"([^"]+)\\\""', text)
+    key_match = re.search(r'SUPABASE_PUBLISHABLE_KEY",\s*"\\\"([^"]+)\\\""', text)
+    if not url_match or not key_match:
+        return None
+    return url_match.group(1), key_match.group(1)
+
+
+def supabase_get(url: str, key: str, table: str, params: dict[str, str]) -> list[dict]:
+    request_url = f"{url}/rest/v1/{table}?{urlencode(params)}"
+    request = Request(
+        request_url,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        },
+    )
+    with urlopen(request, timeout=8) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+        return payload if isinstance(payload, list) else []
+
+
+def hydrate_question_options(
+    question: Question,
+    cache: dict[str, list[dict]],
+    config: tuple[str, str] | None,
+    cache_path: Path,
+) -> None:
+    cached = cache.get(question.title)
+    if cached:
+        question.options = [
+            AnswerOption(
+                label=str(item.get("label") or ""),
+                sentence=str(item.get("sentence") or ""),
+                value=str(item.get("value") or ""),
+            )
+            for item in cached
+            if item.get("label") and item.get("sentence")
+        ]
+        return
+    if config is None:
+        return
+
+    url, key = config
+    try:
+        rows = supabase_get(
+            url,
+            key,
+            "questions",
+            {
+                "select": "id",
+                "question_text": f"eq.{question.title}",
+                "limit": "5",
+            },
+        )
+        for row in rows:
+            question_id = str(row.get("id") or "")
+            if not question_id:
+                continue
+            option_rows = supabase_get(
+                url,
+                key,
+                "question_options",
+                {
+                    "select": "label,diary_sentence,answer_value",
+                    "question_id": f"eq.{question_id}",
+                    "order": "option_order.asc",
+                },
+            )
+            options = [
+                AnswerOption(
+                    label=str(item.get("label") or ""),
+                    sentence=str(item.get("diary_sentence") or ""),
+                    value=str(item.get("answer_value") or ""),
+                )
+                for item in option_rows
+                if item.get("label") and item.get("diary_sentence")
+            ]
+            if not options:
+                continue
+            question.options = options
+            cache[question.title] = [
+                {"label": option.label, "sentence": option.sentence, "value": option.value}
+                for option in options
+            ]
+            save_option_cache(cache_path, cache)
+            return
+    except Exception as error:
+        print(f"보기 불러오기 실패: {error}")
+
+
 def topic_code_for(category: str) -> str:
     return {
         "식사": "food",
@@ -165,6 +286,9 @@ def from_custom_answer(raw_answer: str, question: Question) -> str:
     negative = negative_sentence(phrase, question)
     if negative:
         return polish(negative)
+    framed = sentence_from_option_frame(input_text, phrase, question)
+    if framed:
+        return polish(framed)
     if looks_complete(phrase):
         return polish(repair_by_question(raw_answer, question, with_today_prefix_if_needed(phrase)))
 
@@ -191,9 +315,172 @@ def from_custom_answer(raw_answer: str, question: Question) -> str:
         sentence = spending_sentence(phrase)
     elif context == "work":
         sentence = work_sentence(phrase)
+    elif context == "exercise":
+        sentence = exercise_sentence(phrase)
+    elif context == "hobby":
+        sentence = hobby_sentence(phrase)
+    elif context == "rest":
+        sentence = rest_sentence(phrase)
+    elif context == "study":
+        sentence = study_sentence(phrase)
+    elif context == "appointment":
+        sentence = appointment_sentence(phrase)
+    elif context == "family":
+        sentence = family_sentence(phrase)
+    elif context == "people":
+        sentence = people_sentence(phrase)
+    elif context == "home":
+        sentence = home_sentence(phrase)
     else:
         sentence = activity_sentence(phrase)
     return polish(repair_by_question(raw_answer, question, sentence))
+
+
+def sentence_from_option_frame(raw_input: str, phrase: str, question: Question) -> str | None:
+    frame = infer_sentence_frame(question.options)
+    if frame is None:
+        return None
+    prefix, suffix, _sample_slot, _support = frame
+    context = detect_context(phrase, question)
+    if suffix and looks_complete(phrase):
+        slot = phrase
+        suffix = ""
+    elif suffix:
+        slot = normalize_nominal_input(raw_input)
+    else:
+        slot = clause_for_frame(phrase, context)
+    slot = slot.strip()
+    if not slot:
+        return None
+    return prefix + slot + adjust_leading_particle(suffix, slot)
+
+
+def infer_sentence_frame(options: list[AnswerOption]) -> tuple[str, str, str, int] | None:
+    frames: list[tuple[str, str, str]] = []
+    for option in options:
+        sentence = sanitize_option_sentence(clean_input(option.sentence), option)
+        if is_malformed_option_sentence(sentence):
+            continue
+        candidates: list[str] = []
+        for answer in (option.label, option.value):
+            if not answer:
+                continue
+            cleaned = clean_input(answer)
+            normalized = strip_leading_self(normalize_polite_ending(cleaned))
+            candidates.extend((cleaned, normalize_nominal_input(cleaned), normalized, normalize_state_word(normalized)))
+        candidates = sorted({item for item in candidates if len(item) >= 2}, key=len, reverse=True)
+        slot = next((item for item in candidates if item in sentence), "")
+        if not slot:
+            continue
+        index = sentence.index(slot)
+        frames.append((sentence[:index], sentence[index + len(slot):], slot))
+    if not frames:
+        return None
+
+    grouped: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+    for frame in frames:
+        grouped.setdefault((frame[0], frame[1]), []).append(frame)
+    matches = max(
+        grouped.values(),
+        key=lambda items: frame_score(items[0][0], items[0][1], len(items)),
+    )
+    prefix, suffix, sample = matches[0]
+    return prefix, suffix, sample, len(matches)
+
+
+def frame_score(prefix: str, suffix: str, support: int) -> int:
+    subject = prefix.replace("오늘은", "").replace("오늘", "").replace("나는", "").strip()
+    return len(subject) * 100 + support * 10 + len(suffix)
+
+
+def sanitize_option_sentence(raw_sentence: str, option: AnswerOption) -> str:
+    sentence = raw_sentence
+    for answer in (option.label, option.value):
+        noun = normalize_nominal_input(answer)
+        if len(noun) < 2 or " " in noun:
+            continue
+        sentence = sentence.replace(f"{noun}이다를", with_object_particle(noun))
+        sentence = sentence.replace(f"{noun}이다을", with_object_particle(noun))
+        sentence = sentence.replace(f"{noun}이다가", with_subject_particle(noun))
+        sentence = sentence.replace(f"{noun}이다는", noun + ("은" if has_final_consonant(noun[-1]) else "는"))
+        sentence = sentence.replace(f"{noun}였다", noun + ("이었다" if has_final_consonant(noun[-1]) else "였다"))
+    return sentence.replace("오늘은 오늘은", "오늘은")
+
+
+def is_malformed_option_sentence(sentence: str) -> bool:
+    if "오늘은 오늘은" in sentence:
+        return True
+    return re.search(r"(?:했다|었다|았다|였다|이다|해|어|아)(?:을|를|이|가|은|는)(?:\s|$)", sentence) is not None
+
+
+def clause_for_frame(phrase: str, context: str) -> str:
+    if looks_complete(phrase):
+        return phrase
+    if context in {"mood", "condition", "weather"}:
+        return normalize_state_word(phrase)
+    if context == "exercise":
+        if has_any(phrase, "많", "적", "비슷", "평소", "보통"):
+            return normalize_state_word(phrase)
+        return activity_sentence(phrase).removeprefix("오늘은 ")
+    if context == "food":
+        if has_any(phrase, "많", "적", "비슷", "평소", "보통", "든든", "부족", "간단"):
+            return normalize_state_word(phrase)
+        return f"{with_object_particle(normalize_nominal_input(phrase))} 먹었다"
+    if context == "reason":
+        if phrase.replace(" ", "") in NO_REASON_WORDS:
+            return "특별한 이유는 없었다"
+        return f"{with_subject_particle(phrase)} 이유였다"
+    if context == "thought":
+        return f"{normalize_nominal_input(phrase)}에 대해 생각했다"
+
+    builders = {
+        "sleep": sleep_sentence,
+        "drink": drink_sentence,
+        "movement": movement_sentence,
+        "spending": spending_sentence,
+        "work": work_sentence,
+        "hobby": hobby_sentence,
+        "rest": rest_sentence,
+        "study": study_sentence,
+        "appointment": appointment_sentence,
+        "family": family_sentence,
+        "people": people_sentence,
+        "home": home_sentence,
+    }
+    builder = builders.get(context, activity_sentence)
+    return builder(phrase).removeprefix("오늘은 ")
+
+
+def normalize_nominal_input(raw: str) -> str:
+    text = clean_input(raw)
+    for prefix in ("오늘은 ", "오늘 "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    for suffix in ("이에요", "예요", "이요", "요"):
+        if text.endswith(suffix):
+            text = text[:-len(suffix)]
+            break
+    return text.strip()
+
+
+def adjust_leading_particle(suffix: str, slot: str) -> str:
+    if not suffix or not slot:
+        return suffix
+    has_batchim = has_final_consonant(slot[-1])
+    pairs = (
+        (("을", "를"), "을" if has_batchim else "를"),
+        (("이", "가"), "이" if has_batchim else "가"),
+        (("은", "는"), "은" if has_batchim else "는"),
+        (("과", "와"), "과" if has_batchim else "와"),
+    )
+    for particles, replacement in pairs:
+        if suffix.startswith(particles):
+            return replacement + suffix[1:]
+    if suffix.startswith(("으로", "로")):
+        rieul_batchim = "가" <= slot[-1] <= "힣" and ((ord(slot[-1]) - ord("가")) % 28 == 8)
+        replacement = "으로" if has_batchim and not rieul_batchim else "로"
+        return replacement + suffix[(2 if suffix.startswith("으로") else 1):]
+    return suffix
 
 
 def repair_by_question(raw_answer: str, question: Question, sentence: str) -> str:
@@ -471,6 +758,79 @@ def work_sentence(phrase: str) -> str:
     return f"오늘은 {mapped}" if mapped else activity_sentence(phrase)
 
 
+def exercise_sentence(phrase: str) -> str:
+    state = normalize_state_word(phrase)
+    if has_any(state, "비슷", "많", "적", "평소"):
+        return f"오늘의 활동량은 {state}"
+    return activity_sentence(phrase)
+
+
+def hobby_sentence(phrase: str) -> str:
+    compact = phrase.replace(" ", "")
+    mapped = {
+        "종이접기": "종이 접기를 했다",
+        "종이접": "종이 접기를 했다",
+        "게임": "게임을 했다",
+        "독서": "책을 읽었다",
+        "영화": "영화를 봤다",
+        "드라마": "드라마를 봤다",
+    }.get(compact)
+    return f"오늘은 {mapped}" if mapped else activity_sentence(phrase)
+
+
+def rest_sentence(phrase: str) -> str:
+    compact = phrase.replace(" ", "")
+    if has_any(compact, "하루종일", "종일"):
+        return "오늘은 하루 종일 쉬었다"
+    if has_any(compact, "잠", "낮잠"):
+        return "오늘은 잠을 자며 쉬었다"
+    if has_any(compact, "영상", "유튜브"):
+        return "오늘은 영상을 보며 쉬었다"
+    return activity_sentence(phrase)
+
+
+def study_sentence(phrase: str) -> str:
+    compact = phrase.replace(" ", "")
+    mapped = {
+        "영어": "영어 공부를 했다",
+        "한국사": "한국사 공부를 했다",
+        "자격증": "자격증 공부를 했다",
+    }.get(compact)
+    return f"오늘은 {mapped}" if mapped else activity_sentence(phrase)
+
+
+def appointment_sentence(phrase: str) -> str:
+    compact = phrase.replace(" ", "")
+    if "친구" in compact:
+        return "오늘은 친구와 약속이 있었다"
+    if "가족" in compact:
+        return "오늘은 가족과 약속이 있었다"
+    if has_any(compact, "회사", "업무"):
+        return "오늘은 업무 관련 약속이 있었다"
+    return f"오늘은 {phrase}와 약속이 있었다"
+
+
+def family_sentence(phrase: str) -> str:
+    return f"오늘 가족과의 시간은 {normalize_state_word(phrase)}"
+
+
+def people_sentence(phrase: str) -> str:
+    if looks_complete(phrase):
+        return with_today_prefix_if_needed(phrase)
+    return f"오늘 사람들과의 일은 {normalize_state_word(phrase)}"
+
+
+def home_sentence(phrase: str) -> str:
+    compact = phrase.replace(" ", "")
+    mapped = {
+        "청소": "청소를 했다",
+        "정리": "정리를 했다",
+        "요리": "요리를 했다",
+        "빨래": "빨래를 했다",
+    }.get(compact)
+    return f"오늘은 {mapped}" if mapped else activity_sentence(phrase)
+
+
 def activity_sentence(phrase: str) -> str:
     compact = phrase.replace(" ", "")
     mapped = {
@@ -694,15 +1054,20 @@ def run_lab(args: argparse.Namespace) -> None:
     questions = filter_questions(questions, args.keyword, args.topic, args.depth)
     if args.shuffle:
         random.shuffle(questions)
+    option_cache = load_option_cache(args.option_cache)
+    supabase_config = load_supabase_config()
 
     print(f"질문 {len(questions)}개 로딩됨")
+    print("보기 기반 엔진: Supabase 선택지 자동 연결")
     print("명령: :q 종료 / :n 다음 / :s 단어 검색 / :t 토픽 필터 / :d 1 깊이 / :all 전체")
     print(f"로그: {args.log}")
     index = 0
     while 0 <= index < len(questions):
         q = questions[index]
+        hydrate_question_options(q, option_cache, supabase_config, args.option_cache)
         print()
         print(f"[{index + 1}/{len(questions)}] depth={q.depth_level} category={q.category} type={q.custom_answer_type} key={q.key}")
+        print(f"보기 문장 {len(q.options)}개 참고")
         print(q.title)
         answer = input("기타 입력> ").strip()
 
@@ -758,6 +1123,8 @@ def run_lab(args: argparse.Namespace) -> None:
                 "depth_level": q.depth_level,
                 "custom_answer_type": q.custom_answer_type,
                 "answer": answer,
+                "option_count": len(q.options),
+                "option_frame_used": infer_sentence_frame(q.options) is not None,
                 "suspicious": suspicious,
                 "sentence": sentence,
             },
@@ -770,6 +1137,7 @@ def main() -> None:
     parser.add_argument("--sql", type=Path, default=DEFAULT_SQL)
     parser.add_argument("--questions", type=Path, default=None)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--option-cache", type=Path, default=DEFAULT_OPTION_CACHE)
     parser.add_argument("--keyword", default="")
     parser.add_argument("--topic", default="")
     parser.add_argument("--depth", type=int, default=1)

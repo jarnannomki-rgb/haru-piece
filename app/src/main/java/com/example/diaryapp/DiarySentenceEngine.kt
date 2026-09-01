@@ -1,12 +1,20 @@
 package com.example.diaryapp
 
 object DiarySentenceEngine {
+    private data class SentenceFrame(
+        val prefix: String,
+        val suffix: String,
+        val sampleSlot: String,
+        val support: Int
+    )
+
     fun fromCustomAnswer(rawAnswer: String, question: Question): String {
         val input = cleanInput(rawAnswer)
         if (input.isBlank()) return "오늘은 아무것도 남기지 않은 하루였다."
 
         val phrase = stripLeadingSelf(normalizePoliteEnding(input))
         negativeSentence(phrase, question)?.let { return polish(it) }
+        sentenceFromOptionFrame(input, phrase, question)?.let { return polish(it) }
 
         val context = detectContext(phrase, question)
         if (looksComplete(phrase)) return polish(completeSentenceForContext(context, phrase))
@@ -73,6 +81,155 @@ object DiarySentenceEngine {
         if (compact.isBlank()) return false
         if (Regex("[ㄱ-ㅎㅏ-ㅣ]").containsMatchIn(compact)) return true
         return compact.length >= 2 && !Regex("[가-힣A-Za-z0-9]").containsMatchIn(compact)
+    }
+
+    private fun sentenceFromOptionFrame(rawInput: String, phrase: String, question: Question): String? {
+        val frame = inferSentenceFrame(question.options) ?: return null
+        val context = detectContext(phrase, question)
+        val slot = when {
+            frame.suffix.isNotBlank() && looksComplete(phrase) -> phrase
+            frame.suffix.isNotBlank() -> normalizeNominalInput(rawInput)
+            else -> clauseForFrame(phrase, context)
+        }.trim()
+        if (slot.isBlank()) return null
+
+        val suffix = if (frame.suffix.isNotBlank() && looksComplete(phrase)) {
+            ""
+        } else {
+            adjustLeadingParticle(frame.suffix, slot)
+        }
+        return "${frame.prefix}$slot$suffix"
+    }
+
+    private fun inferSentenceFrame(options: List<AnswerOption>): SentenceFrame? {
+        if (options.isEmpty()) return null
+        val frames = options.mapNotNull { option ->
+            val sentence = sanitizeOptionSentence(cleanInput(option.sentence), option)
+            if (isMalformedOptionSentence(sentence)) return@mapNotNull null
+            val candidates = listOfNotNull(option.label, option.value)
+                .flatMap { answer ->
+                    val cleaned = cleanInput(answer)
+                    listOf(
+                        cleaned,
+                        normalizeNominalInput(cleaned),
+                        stripLeadingSelf(normalizePoliteEnding(cleaned)),
+                        normalizeStateWord(stripLeadingSelf(normalizePoliteEnding(cleaned)))
+                    )
+                }
+                .filter { it.length >= 2 }
+                .distinct()
+                .sortedByDescending { it.length }
+            val slot = candidates.firstOrNull { sentence.contains(it) } ?: return@mapNotNull null
+            val index = sentence.indexOf(slot)
+            SentenceFrame(
+                prefix = sentence.substring(0, index),
+                suffix = sentence.substring(index + slot.length),
+                sampleSlot = slot,
+                support = 1
+            )
+        }
+        if (frames.isEmpty()) return null
+
+        val best = frames
+            .groupBy { it.prefix to it.suffix }
+            .map { (_, matches) -> matches.first().copy(support = matches.size) }
+            .maxByOrNull { frameScore(it) }
+            ?: return null
+        return best
+    }
+
+    private fun frameScore(frame: SentenceFrame): Int {
+        val subjectLength = frame.prefix
+            .replace("오늘은", "")
+            .replace("오늘", "")
+            .replace("나는", "")
+            .trim()
+            .length
+        return (subjectLength * 100) + (frame.support * 10) + frame.suffix.length
+    }
+
+    private fun sanitizeOptionSentence(rawSentence: String, option: AnswerOption): String {
+        var sentence = rawSentence
+        listOfNotNull(option.label, option.value).forEach { answer ->
+            val noun = normalizeNominalInput(answer)
+            if (noun.length < 2 || noun.contains(" ")) return@forEach
+            sentence = sentence
+                .replace("${noun}이다를", noun.withObjectParticle())
+                .replace("${noun}이다을", noun.withObjectParticle())
+                .replace("${noun}이다가", noun.withSubjectParticle())
+                .replace("${noun}이다는", noun + if (hasFinalConsonant(noun.last())) "은" else "는")
+                .replace("${noun}였다", noun + if (hasFinalConsonant(noun.last())) "이었다" else "였다")
+        }
+        return sentence.replace("오늘은 오늘은", "오늘은")
+    }
+
+    private fun isMalformedOptionSentence(sentence: String): Boolean {
+        if (sentence.contains("오늘은 오늘은")) return true
+        return Regex("(?:했다|었다|았다|였다|이다|해|어|아)(?:을|를|이|가|은|는)(?:\\s|$)")
+            .containsMatchIn(sentence)
+    }
+
+    private fun clauseForFrame(phrase: String, context: String): String {
+        if (looksComplete(phrase)) return phrase
+        return when (context) {
+            "mood", "condition", "weather" -> normalizeStateWord(phrase)
+            "exercise" -> if (phrase.hasAny("많", "적", "비슷", "평소", "보통")) {
+                normalizeStateWord(phrase)
+            } else {
+                activitySentence(phrase).removePrefix("오늘은 ")
+            }
+            "food" -> if (phrase.hasAny("많", "적", "비슷", "평소", "보통", "든든", "부족", "간단")) {
+                normalizeStateWord(phrase)
+            } else {
+                "${normalizeNominalInput(phrase).withObjectParticle()} 먹었다"
+            }
+            "reason" -> if (phrase.replace(" ", "") in noReasonWords) {
+                "특별한 이유는 없었다"
+            } else {
+                "${phrase.withSubjectParticle()} 이유였다"
+            }
+            "thought" -> "${normalizeNominalInput(phrase).withTopicParticle()} 대해 생각했다"
+            "sleep" -> sleepSentence(phrase).removePrefix("오늘은 ")
+            "drink" -> drinkSentence(phrase).removePrefix("오늘은 ")
+            "movement" -> movementSentence(phrase).removePrefix("오늘은 ")
+            "spending" -> spendingSentence(phrase).removePrefix("오늘은 ")
+            "work" -> workSentence(phrase).removePrefix("오늘은 ")
+            "hobby" -> hobbySentence(phrase).removePrefix("오늘은 ")
+            "rest" -> restSentence(phrase).removePrefix("오늘은 ")
+            "study" -> studySentence(phrase).removePrefix("오늘은 ")
+            "appointment" -> appointmentSentence(phrase).removePrefix("오늘은 ")
+            "family" -> familySentence(phrase).removePrefix("오늘은 ")
+            "people" -> peopleSentence(phrase).removePrefix("오늘은 ")
+            "home" -> homeSentence(phrase).removePrefix("오늘은 ")
+            else -> activitySentence(phrase).removePrefix("오늘은 ")
+        }
+    }
+
+    private fun normalizeNominalInput(raw: String): String {
+        return cleanInput(raw)
+            .removePrefix("오늘은 ")
+            .removePrefix("오늘 ")
+            .removeSuffix("이에요")
+            .removeSuffix("예요")
+            .removeSuffix("이요")
+            .removeSuffix("요")
+            .trim()
+    }
+
+    private fun adjustLeadingParticle(suffix: String, slot: String): String {
+        if (suffix.isBlank() || slot.isBlank()) return suffix
+        val hasBatchim = hasFinalConsonant(slot.last())
+        return when {
+            suffix.startsWith("을") || suffix.startsWith("를") -> (if (hasBatchim) "을" else "를") + suffix.drop(1)
+            suffix.startsWith("이") || suffix.startsWith("가") -> (if (hasBatchim) "이" else "가") + suffix.drop(1)
+            suffix.startsWith("은") || suffix.startsWith("는") -> (if (hasBatchim) "은" else "는") + suffix.drop(1)
+            suffix.startsWith("과") || suffix.startsWith("와") -> (if (hasBatchim) "과" else "와") + suffix.drop(1)
+            suffix.startsWith("으로") || suffix.startsWith("로") -> {
+                val rieulBatchim = slot.last() in '가'..'힣' && ((slot.last().code - '가'.code) % 28 == 8)
+                (if (hasBatchim && !rieulBatchim) "으로" else "로") + suffix.drop(if (suffix.startsWith("으로")) 2 else 1)
+            }
+            else -> suffix
+        }
     }
 
     fun looksSuspicious(rawAnswer: String, question: Question): Boolean {
