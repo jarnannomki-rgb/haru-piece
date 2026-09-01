@@ -8,6 +8,19 @@ object DiarySentenceEngine {
         val support: Int
     )
 
+    fun fromOption(option: AnswerOption, question: Question): String {
+        val original = cleanInput(option.sentence)
+        val sanitized = sanitizeOptionSentence(original, option)
+        if (sanitized != original) {
+            val phrase = stripLeadingSelf(normalizePoliteEnding(cleanInput(option.label)))
+            val frame = inferSentenceFrame(question.options)
+            if (frame != null && hasMeaningfulSubject(frame.prefix)) {
+                sentenceFromOptionFrame(option.label, phrase, question)?.let { return polish(it) }
+            }
+        }
+        return polish(sanitized)
+    }
+
     fun fromCustomAnswer(rawAnswer: String, question: Question): String {
         val input = cleanInput(rawAnswer)
         if (input.isBlank()) return "오늘은 아무것도 남기지 않은 하루였다."
@@ -86,14 +99,15 @@ object DiarySentenceEngine {
     private fun sentenceFromOptionFrame(rawInput: String, phrase: String, question: Question): String? {
         val frame = inferSentenceFrame(question.options) ?: return null
         val context = detectContext(phrase, question)
+        val copulaSlot = frame.suffix.hasAny("이었다", "였다") && phrase.endsWith("이다")
         val slot = when {
-            frame.suffix.isNotBlank() && looksComplete(phrase) -> phrase
+            frame.suffix.isNotBlank() && looksComplete(phrase) && !copulaSlot -> phrase
             frame.suffix.isNotBlank() -> normalizeNominalInput(rawInput)
             else -> clauseForFrame(phrase, context)
         }.trim()
         if (slot.isBlank()) return null
 
-        val suffix = if (frame.suffix.isNotBlank() && looksComplete(phrase)) {
+        val suffix = if (frame.suffix.isNotBlank() && looksComplete(phrase) && !copulaSlot) {
             ""
         } else {
             adjustLeadingParticle(frame.suffix, slot)
@@ -148,17 +162,36 @@ object DiarySentenceEngine {
         return (subjectLength * 100) + (frame.support * 10) + frame.suffix.length
     }
 
+    private fun hasMeaningfulSubject(prefix: String): Boolean {
+        return prefix
+            .replace("오늘은", "")
+            .replace("오늘", "")
+            .replace("나는", "")
+            .trim()
+            .isNotBlank()
+    }
+
     private fun sanitizeOptionSentence(rawSentence: String, option: AnswerOption): String {
         var sentence = rawSentence
         listOfNotNull(option.label, option.value).forEach { answer ->
+            val cleaned = cleanInput(answer)
+            val declarative = normalizeStateWord(stripLeadingSelf(normalizePoliteEnding(cleaned)))
             val noun = normalizeNominalInput(answer)
-            if (noun.length < 2 || noun.contains(" ")) return@forEach
-            sentence = sentence
-                .replace("${noun}이다를", noun.withObjectParticle())
-                .replace("${noun}이다을", noun.withObjectParticle())
-                .replace("${noun}이다가", noun.withSubjectParticle())
-                .replace("${noun}이다는", noun + if (hasFinalConsonant(noun.last())) "은" else "는")
-                .replace("${noun}였다", noun + if (hasFinalConsonant(noun.last())) "이었다" else "였다")
+            if (noun.length >= 2) {
+                sentence = sentence
+                    .replace("${noun}이다를", noun.withObjectParticle())
+                    .replace("${noun}이다을", noun.withObjectParticle())
+                    .replace("${noun}이다가", noun.withSubjectParticle())
+                    .replace("${noun}이다는", noun + if (hasFinalConsonant(noun.last())) "은" else "는")
+                    .replace("${noun}였다", noun + if (hasFinalConsonant(noun.last())) "이었다" else "였다")
+            }
+            if (!declarative.endsWith("이다")) {
+                listOf(noun, declarative).filter { it.isNotBlank() }.forEach { form ->
+                    sentence = sentence
+                        .replace("${form}를 먹었다", declarative)
+                        .replace("${form}을 먹었다", declarative)
+                }
+            }
         }
         return sentence.replace("오늘은 오늘은", "오늘은")
     }
@@ -220,6 +253,9 @@ object DiarySentenceEngine {
         if (suffix.isBlank() || slot.isBlank()) return suffix
         val hasBatchim = hasFinalConsonant(slot.last())
         return when {
+            suffix.startsWith("이었다") || suffix.startsWith("였다") -> {
+                (if (hasBatchim) "이었다" else "였다") + suffix.drop(if (suffix.startsWith("이었다")) 3 else 2)
+            }
             suffix.startsWith("을") || suffix.startsWith("를") -> (if (hasBatchim) "을" else "를") + suffix.drop(1)
             suffix.startsWith("이") || suffix.startsWith("가") -> (if (hasBatchim) "이" else "가") + suffix.drop(1)
             suffix.startsWith("은") || suffix.startsWith("는") -> (if (hasBatchim) "은" else "는") + suffix.drop(1)

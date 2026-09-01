@@ -342,7 +342,8 @@ def sentence_from_option_frame(raw_input: str, phrase: str, question: Question) 
         return None
     prefix, suffix, _sample_slot, _support = frame
     context = detect_context(phrase, question)
-    if suffix and looks_complete(phrase):
+    copula_slot = ("이었다" in suffix or "였다" in suffix) and phrase.endswith("이다")
+    if suffix and looks_complete(phrase) and not copula_slot:
         slot = phrase
         suffix = ""
     elif suffix:
@@ -353,6 +354,18 @@ def sentence_from_option_frame(raw_input: str, phrase: str, question: Question) 
     if not slot:
         return None
     return prefix + slot + adjust_leading_particle(suffix, slot)
+
+
+def sentence_from_option(option: AnswerOption, question: Question) -> str:
+    original = clean_input(option.sentence)
+    sanitized = sanitize_option_sentence(original, option)
+    frame = infer_sentence_frame(question.options)
+    if sanitized != original and frame and has_meaningful_subject(frame[0]):
+        phrase = strip_leading_self(normalize_polite_ending(clean_input(option.label)))
+        framed = sentence_from_option_frame(option.label, phrase, question)
+        if framed:
+            return polish(framed)
+    return polish(sanitized)
 
 
 def infer_sentence_frame(options: list[AnswerOption]) -> tuple[str, str, str, int] | None:
@@ -393,17 +406,28 @@ def frame_score(prefix: str, suffix: str, support: int) -> int:
     return len(subject) * 100 + support * 10 + len(suffix)
 
 
+def has_meaningful_subject(prefix: str) -> bool:
+    subject = prefix.replace("오늘은", "").replace("오늘", "").replace("나는", "").strip()
+    return bool(subject)
+
+
 def sanitize_option_sentence(raw_sentence: str, option: AnswerOption) -> str:
     sentence = raw_sentence
     for answer in (option.label, option.value):
+        cleaned = clean_input(answer)
+        declarative = normalize_state_word(strip_leading_self(normalize_polite_ending(cleaned)))
         noun = normalize_nominal_input(answer)
-        if len(noun) < 2 or " " in noun:
-            continue
-        sentence = sentence.replace(f"{noun}이다를", with_object_particle(noun))
-        sentence = sentence.replace(f"{noun}이다을", with_object_particle(noun))
-        sentence = sentence.replace(f"{noun}이다가", with_subject_particle(noun))
-        sentence = sentence.replace(f"{noun}이다는", noun + ("은" if has_final_consonant(noun[-1]) else "는"))
-        sentence = sentence.replace(f"{noun}였다", noun + ("이었다" if has_final_consonant(noun[-1]) else "였다"))
+        if len(noun) >= 2:
+            sentence = sentence.replace(f"{noun}이다를", with_object_particle(noun))
+            sentence = sentence.replace(f"{noun}이다을", with_object_particle(noun))
+            sentence = sentence.replace(f"{noun}이다가", with_subject_particle(noun))
+            sentence = sentence.replace(f"{noun}이다는", noun + ("은" if has_final_consonant(noun[-1]) else "는"))
+            sentence = sentence.replace(f"{noun}였다", noun + ("이었다" if has_final_consonant(noun[-1]) else "였다"))
+        if not declarative.endswith("이다"):
+            for form in (noun, declarative):
+                if form:
+                    sentence = sentence.replace(f"{form}를 먹었다", declarative)
+                    sentence = sentence.replace(f"{form}을 먹었다", declarative)
     return sentence.replace("오늘은 오늘은", "오늘은")
 
 
@@ -467,6 +491,9 @@ def adjust_leading_particle(suffix: str, slot: str) -> str:
     if not suffix or not slot:
         return suffix
     has_batchim = has_final_consonant(slot[-1])
+    if suffix.startswith(("이었다", "였다")):
+        replacement = "이었다" if has_batchim else "였다"
+        return replacement + suffix[(3 if suffix.startswith("이었다") else 2):]
     pairs = (
         (("을", "를"), "을" if has_batchim else "를"),
         (("이", "가"), "이" if has_batchim else "가"),

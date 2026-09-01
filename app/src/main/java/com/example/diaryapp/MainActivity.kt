@@ -762,7 +762,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
 
     fun submitAnswer(option: AnswerOption) {
         val question = currentQuestion ?: return
-        answers.add(polishDiaryText(option.sentence))
+        answers.add(DiarySentenceEngine.fromOption(option, question))
         nextGroupKey = option.nextGroupKey ?: question.defaultNextGroupKey
         if (questionIndex + 1 >= questionLimit) {
             finishNormally(answers.toList())
