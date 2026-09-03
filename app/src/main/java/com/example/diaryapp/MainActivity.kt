@@ -686,6 +686,7 @@ fun MainTabs(
     var selectedTab by remember { mutableStateOf("오늘") }
     val density = LocalDensity.current
     val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
+    BackHandler(enabled = selectedTab != "달력") { selectedTab = "달력" }
 
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Box(modifier = Modifier.weight(1f)) {
@@ -762,6 +763,20 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         mode = "review"
     }
 
+    fun cancelQuestionFlow() {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+        answers.clear()
+        customInput = ""
+        customAnswerLoading = false
+        dbQuestions.clear()
+        resolvedQuestions.clear()
+        missedDbRequests.clear()
+        nextGroupKey = null
+        questionIndex = 0
+        mode = "start"
+    }
+
     fun submitAnswer(option: AnswerOption) {
         val question = currentQuestion ?: return
         answers.add(DiarySentenceEngine.fromOption(option, question))
@@ -813,7 +828,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
             val requestKey = listOf(recordDate.format(DateFormatter), questionIndex.toString(), nextGroupKey ?: "start", entries.size.toString()).joinToString("|")
             questionLoading = true
             if (!missedDbRequests.contains(requestKey)) {
-                val dbQuestion = fetchDbQuestion(profile, entries, recordDate, questionIndex + 1, questionLimit, nextGroupKey)
+                val dbQuestion = fetchDbQuestion(context, profile, entries, recordDate, questionIndex + 1, questionLimit, nextGroupKey)
                 if (dbQuestion != null) {
                     dbQuestions[questionIndex] = dbQuestion
                 } else {
@@ -822,6 +837,17 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
             }
             resolvedQuestions[questionIndex] = true
             questionLoading = false
+        }
+    }
+    BackHandler(enabled = mode != "start") {
+        when (mode) {
+            "question" -> cancelQuestionFlow()
+            "review" -> {
+                keyboardController?.hide()
+                focusManager.clearFocus()
+                mode = "question"
+            }
+            else -> onMoveCalendar()
         }
     }
     if (showResetConfirm) {
@@ -904,18 +930,7 @@ TestDatePicker(recordDate, { recordDate = it })
                 }
                 TextButton(
                     enabled = !customAnswerLoading,
-                    onClick = {
-                        keyboardController?.hide()
-                        focusManager.clearFocus()
-                        answers.clear()
-                        customInput = ""
-                        dbQuestions.clear()
-                        resolvedQuestions.clear()
-                        missedDbRequests.clear()
-                        nextGroupKey = null
-                        questionIndex = 0
-                        mode = "start"
-                    },
+                    onClick = ::cancelQuestionFlow,
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 ) {
                     Text("취소", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f))
@@ -958,20 +973,20 @@ TestDatePicker(recordDate, { recordDate = it })
             }
             "done" -> WhitePanel {
                 LaunchedEffect(Unit) {
-                    delay(900)
+                    delay(1_500)
                     onMoveCalendar()
                 }
-                PieceCluster()
+                GatheringPieceCluster()
                 Text("오늘도 한 조각이 쌓였어요.", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
                 Text("잠시 후 달력에서 오늘의 조각을 보여드릴게요.", color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 22.sp)
                 PrimaryButton("달력 보기") { onMoveCalendar() }
             }
             "restDone" -> WhitePanel {
                 LaunchedEffect(Unit) {
-                    delay(900)
+                    delay(1_500)
                     onMoveCalendar()
                 }
-                PieceCluster()
+                GatheringPieceCluster()
                 Text("오늘 하루 푹 쉬세요.", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
                 Text("쉬어가기로 한 마음도 오늘의 기록으로 남겨둘게요.", color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 22.sp)
                 PrimaryButton("달력 보기") { onMoveCalendar() }
@@ -1825,6 +1840,75 @@ fun PieceCluster() {
         Box(Modifier.padding(start = 48.dp, bottom = 42.dp).size(44.dp).clip(RoundedCornerShape(15.dp)).background(Lavender))
         Box(Modifier.padding(end = 54.dp, top = 42.dp).size(38.dp).clip(RoundedCornerShape(13.dp)).background(Mint))
         Box(Modifier.padding(start = 22.dp, top = 62.dp).size(28.dp).clip(CircleShape).background(Sky))
+    }
+}
+
+@Composable
+fun GatheringPieceCluster() {
+    val progress = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    val distance = with(density) { 62.dp.toPx() }
+
+    LaunchedEffect(Unit) {
+        progress.snapTo(0f)
+        progress.animateTo(1f, animationSpec = tween(durationMillis = 760))
+    }
+
+    val value = progress.value
+    Box(Modifier.size(112.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(58.dp)
+                .graphicsLayer {
+                    translationY = distance * (1f - value)
+                    rotationZ = 18f * (1f - value)
+                    scaleX = 0.72f + (0.28f * value)
+                    scaleY = scaleX
+                    alpha = 0.2f + (0.8f * value)
+                }
+                .clip(RoundedCornerShape(18.dp))
+                .background(Peach)
+        )
+        Box(
+            Modifier
+                .padding(start = 48.dp, bottom = 42.dp)
+                .size(44.dp)
+                .graphicsLayer {
+                    translationX = distance * (1f - value)
+                    translationY = -distance * 0.45f * (1f - value)
+                    rotationZ = -24f * (1f - value)
+                    alpha = value
+                }
+                .clip(RoundedCornerShape(15.dp))
+                .background(Lavender)
+        )
+        Box(
+            Modifier
+                .padding(end = 54.dp, top = 42.dp)
+                .size(38.dp)
+                .graphicsLayer {
+                    translationX = -distance * (1f - value)
+                    translationY = distance * 0.35f * (1f - value)
+                    rotationZ = 28f * (1f - value)
+                    alpha = value
+                }
+                .clip(RoundedCornerShape(13.dp))
+                .background(Mint)
+        )
+        Box(
+            Modifier
+                .padding(start = 22.dp, top = 62.dp)
+                .size(28.dp)
+                .graphicsLayer {
+                    translationX = distance * 0.45f * (1f - value)
+                    translationY = distance * (1f - value)
+                    scaleX = 0.55f + (0.45f * value)
+                    scaleY = scaleX
+                    alpha = value
+                }
+                .clip(CircleShape)
+                .background(Sky)
+        )
     }
 }
 
