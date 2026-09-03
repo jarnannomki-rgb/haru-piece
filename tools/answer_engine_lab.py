@@ -26,6 +26,15 @@ DEFAULT_LOG = ROOT / "answer_engine_lab_log.jsonl"
 DEFAULT_OPTION_CACHE = ROOT / "answer_engine_option_cache.json"
 APP_BUILD_FILE = ROOT / "app" / "build.gradle.kts"
 
+LOCAL_OPTION_OVERRIDES = {
+    "오늘 약속은 어떤 쪽에 가까운가요?": [
+        ("사람을 만나는 약속", "오늘은 사람을 만나는 약속이 있었다."),
+        ("식사 약속", "오늘은 식사 약속이 있었다."),
+        ("업무 관련 약속", "오늘은 업무 관련 약속이 있었다."),
+        ("가족 관련 약속", "오늘은 가족 관련 약속이 있었다."),
+    ],
+}
+
 
 @dataclass
 class AnswerOption:
@@ -43,6 +52,7 @@ class Question:
     custom_answer_type: str = "activity"
     source_topic_code: str = ""
     options: list[AnswerOption] = field(default_factory=list)
+    source_number: int = 0
 
 
 FALLBACK_QUESTIONS = [
@@ -190,6 +200,13 @@ def hydrate_question_options(
     config: tuple[str, str] | None,
     cache_path: Path,
 ) -> None:
+    override = LOCAL_OPTION_OVERRIDES.get(question.title)
+    if override:
+        question.options = [
+            AnswerOption(label=label, sentence=sentence, value=f"local_{index}")
+            for index, (label, sentence) in enumerate(override, start=1)
+        ]
+        return
     cached = cache.get(question.title)
     if cached:
         question.options = [
@@ -286,6 +303,9 @@ def from_custom_answer(raw_answer: str, question: Question) -> str:
     negative = negative_sentence(phrase, question)
     if negative:
         return polish(negative)
+    aware = question_aware_sentence(input_text, phrase, question)
+    if aware:
+        return polish(aware)
     framed = sentence_from_option_frame(input_text, phrase, question)
     if framed:
         return polish(framed)
@@ -334,6 +354,660 @@ def from_custom_answer(raw_answer: str, question: Question) -> str:
     else:
         sentence = activity_sentence(phrase)
     return polish(repair_by_question(raw_answer, question, sentence))
+
+
+def question_aware_sentence(raw_answer: str, phrase: str, question: Question) -> str | None:
+    category = question.category
+    answer_type = question.custom_answer_type
+    if category == "식사" or answer_type == "food":
+        return food_aware_sentence(raw_answer, question)
+    if category == "기분" or answer_type == "mood":
+        return mood_aware_sentence(raw_answer, question)
+    if category == "일" or answer_type == "work":
+        return work_aware_sentence(raw_answer, question)
+    if category == "사람" or answer_type == "people":
+        return people_aware_sentence(raw_answer, question)
+    if category == "소비" or answer_type == "spending":
+        return spending_aware_sentence(raw_answer, question)
+    if category == "운동" or answer_type == "exercise":
+        return exercise_aware_sentence(raw_answer, question)
+    if category == "건강" or answer_type in {"health", "condition"}:
+        return health_aware_sentence(raw_answer, question)
+    if category == "날씨" or answer_type == "weather":
+        return weather_aware_sentence(raw_answer, question)
+    if category == "가족" or answer_type == "family":
+        return family_aware_sentence(raw_answer, question)
+    if category == "집" or answer_type == "home":
+        return home_aware_sentence(raw_answer, question)
+    if category == "취미" or answer_type == "hobby":
+        return hobby_aware_sentence(raw_answer, question)
+    if category == "휴식" or answer_type == "rest":
+        return rest_aware_sentence(raw_answer, question)
+    if category == "공부" or answer_type == "study":
+        return study_aware_sentence(raw_answer, question)
+    if category == "이동" or answer_type == "movement":
+        return movement_aware_sentence(raw_answer, question)
+    if category == "약속" or answer_type == "appointment":
+        return appointment_aware_sentence(raw_answer, question)
+    if category == "생각" or answer_type == "thought":
+        return thought_aware_sentence(raw_answer, question)
+    return None
+
+
+def food_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "식사가", "식사는", "식사량이", "식사량은", "끼니가", "끼니는")
+    compact = answer.replace(" ", "")
+    if "기억나는" in title or "기억나는 게" in title:
+        return f"오늘 기억에 남는 음식은 {as_past_identity(answer)}"
+    if "식사량" in title:
+        return f"오늘 식사량은 {normalize_amount_predicate(answer)}"
+    if "주로 어떻게 해결" in title:
+        if has_any(compact, "혼밥", "혼자"):
+            return "오늘은 혼자 식사했다"
+        if has_any(compact, "배달"):
+            return "오늘은 배달로 식사했다"
+        if has_any(compact, "외식", "밖"):
+            return "오늘은 밖에서 식사했다"
+        return f"오늘은 {normalize_action_predicate(answer, '식사했다')}"
+    if "어떻게 챙" in title:
+        if has_any(compact, "먹", "챙"):
+            return f"오늘은 식사를 {normalize_predicate(answer)}"
+        return f"오늘은 {normalize_action_predicate(answer, '식사를 챙겼다')}"
+    return f"오늘 식사는 {normalize_predicate(answer)}"
+
+
+def mood_aware_sentence(raw_answer: str, question: Question) -> str:
+    state = normalize_predicate(strip_answer_subject(raw_answer, "기분이", "기분은", "마음이", "마음은", "감정이", "감정은"))
+    title = question.title
+    if "변화" in title and clean_input(raw_answer).replace(" ", "") in {"아니", "아니야", "없어", "없었어"}:
+        return "오늘은 기분 변화가 없었다"
+    if "가장 오래 이어진" in title:
+        return f"오늘 가장 오래 이어진 기분은 {state}"
+    if "마음 상태" in title:
+        return f"오늘의 마음은 {state}"
+    if "감정" in title:
+        return f"오늘의 감정은 {state}"
+    return f"오늘의 기분은 {state}"
+
+
+def work_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "일이", "일은", "업무가", "업무는")
+    compact = answer.replace(" ", "")
+    if "해야 할 일" in title:
+        if has_any(compact, "다끝", "전부끝", "모두끝", "다했", "전부했", "모두했"):
+            return "오늘은 해야 할 일을 모두 끝냈다"
+        if "끝" in compact:
+            return "오늘은 해야 할 일을 끝냈다"
+        if has_any(compact, "남", "못끝"):
+            return f"오늘은 해야 할 일이 {normalize_predicate(answer)}"
+        if has_any(compact, "진행", "하고있", "하는중"):
+            return "오늘은 해야 할 일을 진행하고 있었다"
+        return f"오늘은 해야 할 일을 {normalize_action_predicate(answer, '처리했다')}"
+    if "흐름" in title:
+        return f"오늘 일의 흐름은 {normalize_predicate(answer)}"
+    if "집중" in title:
+        if has_any(compact, "집중좋", "잘됐", "잘됨"):
+            return "오늘 집중은 잘됐다"
+        return f"오늘 집중은 {normalize_predicate(answer)}"
+    if has_any(title, "눈에 띄는 일", "기억나는 일"):
+        return f"오늘 일에서 기억나는 것은 {as_past_identity(answer)}"
+    if has_any(title, "어떤 편", "어땠", "비교"):
+        return f"오늘 일은 {normalize_predicate(answer)}"
+    return work_sentence(normalize_polite_ending(clean_input(answer)))
+
+
+def people_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "사람들과의 시간이", "사람들과의 시간은", "사람들과의 분위기가", "사람들과의 분위기는")
+    compact = answer.replace(" ", "")
+    if "대화나 연락" in title or "연락이나 대화" in title:
+        if has_any(compact, "많이함", "많이했"):
+            return "오늘은 대화나 연락을 많이 했다"
+        if has_any(compact, "조금함", "조금했"):
+            return "오늘은 대화나 연락을 조금 했다"
+        return f"오늘 대화나 연락은 {normalize_predicate(answer)}"
+    if "사람을 만나는 일" in title:
+        if has_any(compact, "바빴", "바빠"):
+            return "오늘은 사람을 만나느라 바빴다"
+        return f"오늘 사람을 만나는 일은 {normalize_predicate(answer)}"
+    if "분위기" in title:
+        return f"오늘 사람들과의 분위기는 {normalize_predicate(answer)}"
+    if "기억나는 일" in title:
+        if compact in {"아니", "아니야", "없어", "없었어", "없음"}:
+            return "오늘은 사람 때문에 특별히 기억나는 일이 없었다"
+        return f"오늘 사람 때문에 기억나는 일은 {as_past_identity(answer)}"
+    if "시간" in title:
+        return f"오늘 사람들과의 시간은 {normalize_predicate(answer)}"
+    return f"오늘 사람들과의 일은 {normalize_predicate(answer)}"
+
+
+def spending_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "소비가", "소비는", "지출이", "지출은")
+    compact = answer.replace(" ", "")
+    if has_any(title, "눈에 띄는 소비", "기억나는 소비"):
+        return f"오늘 가장 눈에 띈 소비는 {as_past_identity(answer)}"
+    if has_any(title, "돈을 쓴 곳", "지출한 곳"):
+        return f"오늘은 {with_location_particle(normalize_nominal_input(answer))} 돈을 썼다"
+    if "계획한 범위" in title:
+        if has_any(compact, "아니", "벗어", "초과", "충동"):
+            return "오늘 지출은 계획한 범위를 벗어났다"
+        if has_any(compact, "맞", "안", "범위"):
+            return "오늘 지출은 계획한 범위 안이었다"
+        return f"오늘 지출은 {normalize_predicate(answer)}"
+    if has_any(title, "평소와 비교", "어떤 편", "소비를 평소"):
+        if has_any(compact, "많이샀", "많이썼"):
+            return "오늘은 평소보다 소비를 많이 했다"
+        if has_any(compact, "적게샀", "적게썼"):
+            return "오늘은 평소보다 소비를 적게 했다"
+        return f"오늘 소비는 {normalize_predicate(answer)}"
+    if has_any(title, "무엇을 샀", "구매한 것"):
+        return f"오늘은 {with_object_particle(normalize_nominal_input(answer))} 샀다"
+    return f"오늘 소비는 {normalize_predicate(answer)}"
+
+
+def exercise_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "활동량이", "활동량은", "운동이", "운동은")
+    compact = answer.replace(" ", "")
+    if "기분" in compact and has_any(compact, "좋", "최고"):
+        return "오늘은 운동해서 기분이 좋았다"
+    if has_any(title, "방식", "어떤 운동"):
+        return activity_sentence(normalize_polite_ending(clean_input(answer)))
+    if "운동 계획" in title:
+        if has_any(compact, "못", "안함", "실패"):
+            return "오늘은 운동 계획을 지키지 못했다"
+        if has_any(compact, "잘", "완료", "지킴"):
+            return "오늘은 운동 계획을 잘 지켰다"
+        return f"오늘 운동 계획은 {normalize_predicate(answer)}"
+    if has_any(title, "활동량", "얼마나 움직"):
+        if has_any(compact, "하루죙일", "하루종일", "종일"):
+            return "오늘은 하루 종일 몸을 움직였다"
+        if has_any(compact, "많이움직", "많이활동"):
+            return "오늘은 몸을 많이 움직였다"
+        return f"오늘 활동량은 {normalize_amount_predicate(answer)}"
+    return f"오늘 운동은 {normalize_predicate(answer)}"
+
+
+def health_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "몸이", "몸은", "컨디션이", "컨디션은")
+    compact = answer.replace(" ", "")
+    if has_any(title, "불편한 곳", "아픈 곳", "통증"):
+        if compact in {"이곳저곳", "여기저기", "온몸"}:
+            return "오늘은 몸 이곳저곳이 불편했다"
+        if "없" in compact:
+            return "오늘은 몸에 불편한 곳이 없었다"
+        return f"오늘은 {with_subject_particle(normalize_nominal_input(answer))} 불편했다"
+    if "몸을 챙기는 일" in title and has_any(compact, "활기참", "활기차", "활기"):
+        return "오늘 몸 상태는 활기찼다"
+    return f"오늘 컨디션은 {normalize_predicate(answer)}"
+
+
+def weather_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "날씨가", "날씨는")
+    compact = answer.replace(" ", "")
+    if "영향" in title:
+        if "없" in compact or has_any(compact, "아니", "그렇지않"):
+            return "오늘은 날씨의 영향을 받지 않았다"
+        if has_any(compact, "많이줌", "많이받", "큰영향"):
+            return "오늘은 날씨의 영향을 많이 받았다"
+        if has_any(compact, "조금줌", "조금받"):
+            return "오늘은 날씨의 영향을 조금 받았다"
+        if has_any(compact, "행복", "기분좋", "즐거"):
+            return "오늘은 날씨 덕분에 행복했다" if "행복" in compact else "오늘은 날씨 덕분에 기분이 좋았다"
+        return f"오늘은 날씨의 영향을 {normalize_predicate(answer)}"
+    if "계절감" in title:
+        return f"오늘은 {normalize_nominal_input(answer)}다운 날씨였다"
+    return f"오늘 날씨는 {normalize_predicate(answer)}"
+
+
+def family_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "가족과의 시간이", "가족과의 시간은", "가족과의 분위기가", "가족과의 분위기는")
+    compact = answer.replace(" ", "")
+    if "어떤 일이" in title:
+        if has_any(compact, "밥먹", "식사"):
+            return "오늘은 가족과 밥을 먹었다"
+        return f"오늘은 가족과 {action_clause(answer)}"
+    if "분위기" in title:
+        return f"오늘 가족과의 분위기는 {normalize_predicate(answer)}"
+    if "관련된 일정" in title:
+        if "없" in compact:
+            return "오늘은 가족과 관련된 일정이 없었다"
+        if compact in {"가족식사", "식사", "같이식사"}:
+            return "오늘은 가족 식사 일정이 있었다"
+        if compact in {"산책", "가족산책"}:
+            return "오늘은 가족과 산책했다"
+        if compact in {"즐거움", "즐거웠어", "즐거워"}:
+            return "오늘은 가족과 즐거운 시간을 보냈다"
+        return f"오늘은 가족과 {as_past_identity(answer)} 일정이 있었다"
+    if "평소와 비교" in title:
+        return f"오늘 가족과의 시간은 {normalize_predicate(answer)}"
+    return f"오늘 가족과 보낸 시간은 {normalize_predicate(answer)}"
+
+
+def home_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "집에서의 시간이", "집에서의 시간은", "집안일이", "집안일은")
+    compact = answer.replace(" ", "")
+    if "어떻게 보내" in title:
+        return f"오늘은 집에서 {adverbial_or_predicate(answer, '보냈다')}"
+    if "집안일" in title:
+        if compact in {"빨래", "세탁"}:
+            return "오늘은 빨래를 했다"
+        return f"오늘은 집안일을 {normalize_action_predicate(answer, '했다')}"
+    if "가장 가까운 모습" in title:
+        return f"오늘 집에서의 모습은 {as_past_identity(answer)}"
+    if "보낸 시간" in title:
+        return f"오늘 집에서 보낸 시간은 {normalize_predicate(answer)}"
+    if "평소와 다른 일" in title:
+        if "없" in compact:
+            return "오늘은 집에서 평소와 다른 일이 없었다"
+        return f"오늘 집에서 평소와 달랐던 일은 {as_past_identity(answer)}"
+    return f"오늘은 집에서 {normalize_predicate(answer)}"
+
+
+def hobby_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "취미 시간이", "취미 시간은", "취미가", "취미는")
+    compact = answer.replace(" ", "")
+    if has_any(title, "취미로 한 일", "여유 시간에 무엇"):
+        return f"오늘은 {action_clause(answer)}"
+    if "평소와 비교" in title:
+        if has_any(compact, "더많은시간", "오래보냈", "더오래"):
+            return "오늘은 평소보다 취미에 더 많은 시간을 보냈다"
+        if has_any(compact, "더적은시간", "짧게보냈", "덜했"):
+            return "오늘은 평소보다 취미에 적은 시간을 보냈다"
+        return f"오늘 취미 시간은 {normalize_predicate(answer)}"
+    if "콘텐츠나 활동" in title:
+        if "없" in compact:
+            return "오늘은 관심이 간 콘텐츠나 활동이 없었다"
+        return f"오늘 관심이 간 활동은 {as_past_identity(answer)}"
+    if "즐긴 방식" in title:
+        if compact in {"혼자즐김", "혼자", "혼자서"}:
+            return "오늘은 혼자 취미를 즐겼다"
+        if has_any(compact, "쉬", "보", "했", "즐"):
+            return f"오늘은 {action_clause(answer)}"
+        return f"오늘은 {normalize_nominal_input(answer)} 방식으로 취미를 즐겼다"
+    return f"오늘 취미 시간은 {normalize_predicate(answer)}"
+
+
+def rest_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "휴식 시간이", "휴식 시간은")
+    compact = answer.replace(" ", "")
+    if "어떻게 쉬" in title:
+        return f"오늘은 {adverbial_or_predicate(answer, '쉬었다')}"
+    if "휴식 시간" in title:
+        return f"오늘 휴식 시간은 {normalize_duration_predicate(answer)}"
+    if "쉬는 방식" in title:
+        if compact in {"집에서휴식", "집에서쉼", "집에서쉬기"}:
+            return "오늘은 집에서 쉬었다"
+        return f"오늘은 {action_clause(answer, rest_mode=True)}"
+    if "잘 쉬고" in title:
+        if has_any(compact, "평소보다좋", "더잘쉼", "잘쉼"):
+            return "오늘은 평소보다 잘 쉬었다"
+        if compact in {"편하게", "푹", "느긋하게"}:
+            return f"오늘은 {compact} 쉬었다"
+        return f"오늘은 {normalize_predicate(answer)}"
+    if "멈추는 시간" in title:
+        if "없" in compact:
+            return "오늘은 잠깐 멈춰 쉬는 시간이 없었다"
+        if re.search(r"\d+\s*(?:시간|분)", answer):
+            return f"오늘은 {answer} 정도 쉬었다"
+        return "오늘은 잠깐 멈춰 쉬는 시간이 있었다"
+    return f"오늘은 {normalize_predicate(answer)}"
+
+
+def study_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "공부가", "공부는", "집중도가", "집중도는")
+    compact = answer.replace(" ", "")
+    if "공부나 배움" in title:
+        if "없" in compact:
+            return "오늘은 공부하거나 새로 배운 내용이 없었다"
+        return f"오늘 공부는 {normalize_predicate(answer)}"
+    if "쓴 시간" in title:
+        return f"오늘 공부한 시간은 {normalize_duration_identity(answer)}"
+    if "진행되고" in title:
+        if has_any(compact, "잘되고있", "순조롭", "잘진행"):
+            return "오늘 공부는 잘 진행되고 있었다"
+        if has_any(compact, "막혔", "막혀"):
+            return "오늘 공부는 막혀 있었다"
+        return f"오늘 공부는 {normalize_predicate(answer)}"
+    if "배운 내용" in title:
+        content = normalize_study_content(answer)
+        return f"오늘은 {with_object_particle(content)} 배웠다"
+    if "집중도" in title:
+        if has_any(compact, "잘됐", "잘됨", "집중잘"):
+            return "오늘 공부 집중도는 좋았다"
+        return f"오늘 공부 집중도는 {normalize_predicate(answer)}"
+    return f"오늘 공부는 {normalize_predicate(answer)}"
+
+
+def movement_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "이동이", "이동은", "이동 시간이", "이동 시간은")
+    compact = answer.replace(" ", "")
+    if "이동 방식" in title:
+        return movement_method_sentence(answer)
+    if "이동 시간" in title:
+        if has_any(compact, "바빴", "바빠", "바빳"):
+            return "오늘은 이동하느라 바빴다"
+        return f"오늘 이동 시간은 {normalize_duration_predicate(answer)}"
+    if "편한 편" in title:
+        if compact in {"완전", "완전히", "매우", "엄청"}:
+            return "오늘 이동은 완전히 편했다"
+        return f"오늘 이동은 {normalize_predicate(answer)}"
+    if "평소와 다른 이동" in title:
+        if "없" in compact:
+            return "오늘은 평소와 다른 이동이 없었다"
+        return f"오늘 평소와 달랐던 이동은 {as_past_identity(answer)}"
+    return f"오늘 이동은 {normalize_predicate(answer)}"
+
+
+def appointment_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "약속이", "약속은", "일정이", "일정은")
+    compact = answer.replace(" ", "")
+    if "계획대로" in title:
+        if compact in {"응", "네", "예", "맞아", "그래"}:
+            return "오늘 약속 일정은 계획대로 진행됐다"
+        if has_any(compact, "일정대로", "계획대로", "가고있", "진행"):
+            return "오늘 약속 일정은 계획대로 진행되고 있었다"
+        if has_any(compact, "아니", "변경", "취소"):
+            return "오늘 약속 일정은 계획과 달라졌다"
+        return f"오늘 약속 일정은 {normalize_predicate(answer)}"
+    if "예정에 없던 만남" in title:
+        if "없" in compact:
+            return "오늘은 예정에 없던 만남이 생기지 않았다"
+        return "오늘은 예정에 없던 만남이 생겼다"
+    if "사람을 만나는 일정" in title:
+        return f"오늘 사람을 만나는 일정은 {normalize_predicate(answer)}"
+    return f"오늘 약속이나 만남은 {normalize_predicate(answer)}"
+
+
+def thought_aware_sentence(raw_answer: str, question: Question) -> str:
+    title = question.title
+    answer = strip_answer_subject(raw_answer, "생각이", "생각은")
+    compact = answer.replace(" ", "")
+    if "많은 편" in title:
+        if has_any(compact, "별로없", "많지않", "거의없"):
+            return "오늘은 생각이 많지 않았다"
+        return f"오늘은 생각이 {normalize_amount_predicate(answer)}"
+    if "자주 떠오르는" in title:
+        if "없" in compact:
+            return "오늘 머릿속에 자주 떠오른 것은 없었다"
+        return f"오늘 머릿속에 자주 떠오른 것은 {as_past_identity(answer)}"
+    if "정리하고 싶은" in title:
+        if "없" in compact:
+            return "오늘은 특별히 정리하고 싶은 생각이 없었다"
+        return f"오늘은 {normalize_nominal_input(answer)}에 대한 생각을 정리하고 싶었다"
+    if "새로운 생각" in title:
+        if "없" in compact:
+            return "오늘은 새롭게 떠오른 생각이 없었다"
+        return f"오늘 새롭게 떠오른 생각은 {as_past_identity(answer)}"
+    if "평소와 비교" in title:
+        return f"오늘 생각은 평소와 {normalize_comparison_predicate(answer)}"
+    return f"오늘은 생각이 {normalize_predicate(answer)}"
+
+
+def strip_answer_subject(raw: str, *subjects: str) -> str:
+    text = clean_input(raw)
+    text = strip_leading_self(text)
+    for subject in sorted(subjects, key=len, reverse=True):
+        if text.startswith(subject):
+            return text[len(subject):].strip()
+    return text.strip()
+
+
+def normalize_predicate(raw: str) -> str:
+    text = strip_leading_self(normalize_polite_ending(clean_input(raw)))
+    direct = {
+        "최고": "최고였다",
+        "최고야": "최고였다",
+        "최고였어": "최고였다",
+        "쓸쓸함": "쓸쓸했다",
+        "외로움": "외로웠다",
+        "즐거움": "즐거웠다",
+        "행복함": "행복했다",
+        "평균적": "평균적이었다",
+        "평균적이야": "평균적이었다",
+        "평소와 같아": "평소와 같았다",
+        "나쁘지 않음": "나쁘지 않았다",
+        "다 끝냄": "모두 끝냈다",
+        "많이함": "많이 했다",
+        "그닥": "그다지 좋지 않았다",
+        "많다": "많았다",
+        "적다": "적었다",
+        "좋다": "좋았다",
+        "힘들다": "힘들었다",
+        "바쁘다": "바빴다",
+        "괜찮다": "괜찮았다",
+        "같다": "같았다",
+        "높다": "높았다",
+        "낮다": "낮았다",
+        "있다": "있었다",
+        "없다": "없었다",
+        "좋았지": "좋았다",
+        "편했지": "편했다",
+        "즐거웠어": "즐거웠다",
+        "빡셌어": "빡셌다",
+        "길었어": "길었다",
+        "어려웠어": "어려웠다",
+        "바빳어": "바빴다",
+        "많네": "많았다",
+        "없었네": "없었다",
+        "비슷해": "비슷했다",
+        "크게 다르지 않아": "크게 다르지 않았다",
+        "어려워": "어려웠다",
+        "쉬워": "쉬웠다",
+        "재미있어": "재미있었다",
+        "재밌어": "재미있었다",
+        "편해": "편했다",
+        "불편해": "불편했다",
+        "편안해": "편안했다",
+        "지루해": "지루했다",
+        "심심해": "심심했다",
+        "복잡해": "복잡했다",
+        "어색해": "어색했다",
+        "화목해": "화목했다",
+        "행복해": "행복했다",
+        "우울해": "우울했다",
+        "피곤해": "피곤했다",
+        "부족해": "부족했다",
+        "막혔어": "막혀 있었다",
+        "오래 걸렸어": "오래 걸렸다",
+        "취소됐어": "취소됐다",
+        "부담스러워": "부담스러웠다",
+        "더워": "더웠다",
+        "추워": "추웠다",
+        "흐려": "흐렸다",
+        "맑아": "맑았다",
+        "무거워": "무거웠다",
+        "보냈어": "보냈다",
+        "좋음": "좋았다",
+        "안좋음": "좋지 않았다",
+        "많음": "많았다",
+        "적음": "적었다",
+        "어려움": "어려웠다",
+        "쉬움": "쉬웠다",
+        "밝아": "밝았다",
+    }
+    if text in direct:
+        return direct[text]
+    replacements = (
+        ("보냈어", "보냈다"),
+        ("샀어", "샀다"),
+        ("썼어", "썼다"),
+        ("바빴어", "바빴다"),
+        ("바빠", "바빴다"),
+        ("힘들어", "힘들었다"),
+        ("쓸쓸해", "쓸쓸했다"),
+        ("외로워", "외로웠다"),
+        ("즐거워", "즐거웠다"),
+        ("같아", "같았다"),
+        ("많아", "많았다"),
+        ("적어", "적었다"),
+        ("좋네", "좋았다"),
+        ("우중충하네", "우중충했다"),
+        ("좋았지", "좋았다"),
+        ("편했지", "편했다"),
+        ("즐거웠어", "즐거웠다"),
+        ("빡셌어", "빡셌다"),
+        ("길었어", "길었다"),
+        ("어려웠어", "어려웠다"),
+        ("바빳어", "바빴다"),
+        ("많네", "많았다"),
+        ("없었네", "없었다"),
+        ("비슷해", "비슷했다"),
+        ("다르지 않아", "다르지 않았다"),
+    )
+    for ending, replacement in replacements:
+        if text.endswith(ending):
+            return text[:-len(ending)] + replacement
+    if text.endswith("함") and len(text) > 1:
+        return text[:-1].rstrip() + "했다"
+    if looks_complete(text):
+        return text
+    return as_past_identity(text)
+
+
+def normalize_amount_predicate(raw: str) -> str:
+    text = clean_input(raw)
+    compact = text.replace(" ", "")
+    if has_any(compact, "엄청많", "아주많"):
+        return "엄청 많았다"
+    if compact in {"많이", "많음"}:
+        return "많았다"
+    if compact in {"조금", "적게", "적음"}:
+        return "적었다"
+    return normalize_predicate(text)
+
+
+def normalize_action_predicate(raw: str, fallback: str) -> str:
+    text = normalize_predicate(raw)
+    if looks_complete(text):
+        return text
+    return fallback
+
+
+def action_clause(raw: str, rest_mode: bool = False) -> str:
+    text = clean_input(raw).strip()
+    compact = text.replace(" ", "")
+    direct = {
+        "밥먹기": "밥을 먹었다",
+        "밥먹었어": "밥을 먹었다",
+        "식사": "식사했다",
+        "종이접기": "종이 접기를 했다",
+        "집에서쉬었지": "집에서 쉬었다",
+        "집에서쉬었어": "집에서 쉬었다",
+        "잠자기": "잠을 잤다",
+        "자기": "잠을 잤다",
+        "산책": "산책했다",
+        "운동": "운동했다",
+        "내개인취미활동": "개인 취미 활동을 했다",
+        "개인취미활동": "개인 취미 활동을 했다",
+        "노래부르기": "노래를 불렀다",
+    }
+    if compact in direct:
+        return direct[compact]
+    if rest_mode and has_any(compact, "편하게", "가만히", "푹"):
+        return adverbial_or_predicate(text, "쉬었다")
+    predicate = normalize_predicate(text)
+    if looks_complete(predicate):
+        return predicate
+    noun = normalize_nominal_input(text)
+    return f"{with_object_particle(noun)} 했다"
+
+
+def adverbial_or_predicate(raw: str, verb: str) -> str:
+    text = clean_input(raw).strip()
+    predicate = normalize_predicate(text)
+    if looks_complete(predicate) and predicate != as_past_identity(text):
+        return predicate
+    compact = text.replace(" ", "")
+    adverbs = {
+        "편하게": "편하게",
+        "그냥편하게": "그냥 편하게",
+        "푹": "푹",
+        "느긋하게": "느긋하게",
+        "조용히": "조용히",
+    }
+    if compact in adverbs:
+        return f"{adverbs[compact]} {verb}"
+    return f"{text} {verb}"
+
+
+def normalize_duration_predicate(raw: str) -> str:
+    text = clean_input(raw).strip()
+    compact = text.replace(" ", "")
+    if re.search(r"\d+\s*(?:시간|분)", text):
+        return normalize_duration_identity(text)
+    if has_any(compact, "엄청길", "아주길"):
+        return "엄청 길었다"
+    return normalize_predicate(text)
+
+
+def normalize_duration_identity(raw: str) -> str:
+    text = clean_input(raw).strip()
+    text = re.sub(r"^(?:한|약)\s*", "약 ", text)
+    if not text.startswith("약 ") and re.search(r"\d", text):
+        text = "약 " + text
+    return as_past_identity(text)
+
+
+def normalize_study_content(raw: str) -> str:
+    text = clean_input(raw).strip().replace("화하", "화학")
+    text = re.sub(r"(?:이었어|였어|이야|야)$", "", text).strip()
+    parts = [part.strip() for part in re.split(r"[,/]", text) if part.strip()]
+    if len(parts) == 2:
+        return f"{parts[0]}와 {parts[1]}"
+    return text
+
+
+def movement_method_sentence(raw: str) -> str:
+    text = clean_input(raw).strip()
+    compact = text.replace(" ", "")
+    if compact in {"자차", "자가용", "자동차", "차"}:
+        return "오늘은 자차로 이동했다"
+    if compact in {"도보", "걸어서", "걷기"}:
+        return "오늘은 걸어서 이동했다"
+    if compact in {"대중교통", "버스", "지하철", "택시"}:
+        return f"오늘은 {text}{'로' if not has_final_consonant(text[-1]) else '으로'} 이동했다"
+    return f"오늘은 {text}{'로' if not has_final_consonant(text[-1]) else '으로'} 이동했다"
+
+
+def normalize_comparison_predicate(raw: str) -> str:
+    text = clean_input(raw).strip()
+    compact = text.replace(" ", "")
+    if has_any(compact, "크게다르지않", "별로다르지않"):
+        return "크게 다르지 않았다"
+    if has_any(compact, "비슷"):
+        return "비슷했다"
+    return normalize_predicate(text)
+
+
+def as_past_identity(raw: str) -> str:
+    noun = normalize_nominal_input(raw)
+    if not noun:
+        return "특별한 것이 없었다"
+    if looks_complete(noun):
+        return noun
+    return noun + ("이었다" if has_final_consonant(noun[-1]) else "였다")
+
+
+def with_location_particle(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return value
+    if value.endswith(("에", "에서")):
+        return value
+    return value + "에"
 
 
 def sentence_from_option_frame(raw_input: str, phrase: str, question: Question) -> str | None:
@@ -535,6 +1209,8 @@ def negative_sentence(phrase: str, question: Question) -> str | None:
     compact = phrase.replace(" ", "")
     if compact not in NEGATIVE_WORDS:
         return None
+    if "예정에 없던 만남" in question.title:
+        return "오늘은 예정에 없던 만남이 생기지 않았다"
     context = detect_context(phrase, question)
     return {
         "food": "오늘은 식사를 따로 남기지 않았다",
@@ -597,20 +1273,7 @@ def looks_suspicious(raw_answer: str) -> bool:
 
 
 def looks_suspicious_for_question(raw_answer: str, question: Question) -> bool:
-    if looks_suspicious(raw_answer):
-        return True
-    phrase = strip_leading_self(normalize_polite_ending(clean_input(raw_answer)))
-    compact = phrase.replace(" ", "")
-    if not (2 <= len(compact) <= 4):
-        return False
-    context = detect_context(phrase, question)
-    if context == "weather":
-        return not has_any(compact, "좋", "별로", "맑", "흐", "비", "눈", "더", "추", "바람", "습", "선선", "쌀쌀", "따뜻", "덥", "춥")
-    if context == "mood":
-        return not has_any(compact, "좋", "나쁘", "별로", "행복", "우울", "평온", "그럭", "짜증", "화", "걱정", "괜찮", "기쁨", "슬픔")
-    if context == "condition":
-        return not has_any(compact, "좋", "별로", "피곤", "힘들", "괜찮", "아픔", "아파", "무거", "가벼", "졸림")
-    return False
+    return looks_suspicious(raw_answer)
 
 
 def detect_context(phrase: str, question: Question) -> str:
@@ -1068,6 +1731,22 @@ def filter_questions(questions: list[Question], keyword: str, topic: str, depth:
     return result
 
 
+def parse_number_spec(spec: str, maximum: int) -> list[int]:
+    selected: set[int] = set()
+    for token in re.split(r"[\s,]+", spec.strip()):
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            start, end = int(start_text), int(end_text)
+            if start > end:
+                start, end = end, start
+            selected.update(range(start, end + 1))
+        else:
+            selected.add(int(token))
+    return sorted(number for number in selected if 1 <= number <= maximum)
+
+
 def append_log(path: Path, record: dict) -> None:
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -1077,8 +1756,14 @@ def run_lab(args: argparse.Namespace) -> None:
     def fresh_questions() -> list[Question]:
         return load_lab_questions(args.sql, args.questions)
 
-    questions = fresh_questions()
-    questions = filter_questions(questions, args.keyword, args.topic, args.depth)
+    def baseline_questions() -> list[Question]:
+        loaded = filter_questions(fresh_questions(), args.keyword, args.topic, args.depth)
+        for source_number, question in enumerate(loaded, start=1):
+            question.source_number = source_number
+        return loaded
+
+    questions = baseline_questions()
+    all_question_count = len(questions)
     if args.shuffle:
         random.shuffle(questions)
     option_cache = load_option_cache(args.option_cache)
@@ -1086,14 +1771,17 @@ def run_lab(args: argparse.Namespace) -> None:
 
     print(f"질문 {len(questions)}개 로딩됨")
     print("보기 기반 엔진: Supabase 선택지 자동 연결")
-    print("명령: :q 종료 / :n 다음 / :s 단어 검색 / :t 토픽 필터 / :d 1 깊이 / :all 전체")
+    print("명령: :q 종료 / :n 다음 / :i 번호선택 / :s 단어 검색 / :t 토픽 필터 / :d 1 깊이 / :all 전체")
+    print("번호 예시: :i 25,29,44,47,58,59,73-75")
     print(f"로그: {args.log}")
     index = 0
     while 0 <= index < len(questions):
         q = questions[index]
         hydrate_question_options(q, option_cache, supabase_config, args.option_cache)
         print()
-        print(f"[{index + 1}/{len(questions)}] depth={q.depth_level} category={q.category} type={q.custom_answer_type} key={q.key}")
+        source_number = q.source_number or index + 1
+        selection = f" 선택={index + 1}/{len(questions)}" if len(questions) != all_question_count else ""
+        print(f"[{source_number}/{all_question_count}]{selection} depth={q.depth_level} category={q.category} type={q.custom_answer_type} key={q.key}")
         print(f"보기 문장 {len(q.options)}개 참고")
         print(q.title)
         answer = input("기타 입력> ").strip()
@@ -1103,15 +1791,25 @@ def run_lab(args: argparse.Namespace) -> None:
         if answer == ":n" or answer == "":
             index += 1
             continue
+        if answer.startswith(":i "):
+            try:
+                numbers = parse_number_spec(answer[3:], all_question_count)
+            except ValueError:
+                print("번호는 25,29,73-75처럼 입력")
+                continue
+            questions = [q for q in baseline_questions() if q.source_number in numbers]
+            index = 0
+            print(f"번호 선택 결과 {len(questions)}개: {', '.join(map(str, numbers))}")
+            continue
         if answer.startswith(":s "):
             keyword = answer[3:].strip()
-            questions = filter_questions(fresh_questions(), keyword, "", args.depth)
+            questions = filter_questions(baseline_questions(), keyword, "", None)
             index = 0
             print(f"검색 결과 {len(questions)}개")
             continue
         if answer.startswith(":t "):
             topic = answer[3:].strip()
-            questions = filter_questions(fresh_questions(), "", topic, args.depth)
+            questions = filter_questions(baseline_questions(), "", topic, None)
             index = 0
             print(f"토픽 결과 {len(questions)}개")
             continue
@@ -1122,11 +1820,15 @@ def run_lab(args: argparse.Namespace) -> None:
                 print("깊이는 숫자로 입력")
                 continue
             questions = filter_questions(fresh_questions(), args.keyword, args.topic, depth)
+            for source_number, question in enumerate(questions, start=1):
+                question.source_number = source_number
+            all_question_count = len(questions)
             index = 0
             print(f"depth {depth} 결과 {len(questions)}개")
             continue
         if answer == ":all":
-            questions = fresh_questions()
+            questions = baseline_questions()
+            all_question_count = len(questions)
             index = 0
             print(f"전체 {len(questions)}개")
             continue

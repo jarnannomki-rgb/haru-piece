@@ -723,6 +723,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val coroutineScope = rememberCoroutineScope()
     var mode by remember { mutableStateOf("start") }
     var questionIndex by remember { mutableStateOf(0) }
     val answers = remember { mutableStateListOf<String>() }
@@ -732,6 +733,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var showCustomInputWarning by remember { mutableStateOf(false) }
+    var customAnswerLoading by remember { mutableStateOf(false) }
     val dbQuestions = remember { mutableStateMapOf<Int, Question>() }
     val resolvedQuestions = remember { mutableStateMapOf<Int, Boolean>() }
     val missedDbRequests = remember { mutableStateListOf<String>() }
@@ -773,6 +775,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     }
 
     fun submitCustomAnswer() {
+        if (customAnswerLoading) return
         val input = customInput.trim()
         if (input.isBlank()) return
         val question = currentQuestion ?: return
@@ -780,15 +783,28 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
             showCustomInputWarning = true
             return
         }
-        answers.add(sentenceFromCustomAnswer(input, question))
-        nextGroupKey = question.defaultNextGroupKey
-        customInput = ""
+        val localDraft = sentenceFromCustomAnswer(input, question)
+        val submittedQuestionIndex = questionIndex
+        customAnswerLoading = true
         keyboardController?.hide()
         focusManager.clearFocus()
-        if (questionIndex + 1 >= questionLimit) {
-            finishNormally(answers.toList())
-        } else {
-            questionIndex += 1
+        coroutineScope.launch {
+            val polished = polishCustomDiarySentence(question.title, input, localDraft)
+            customAnswerLoading = false
+            if (mode != "question" || questionIndex != submittedQuestionIndex) return@launch
+            if (polished?.needsReview == true) {
+                showCustomInputWarning = true
+                return@launch
+            }
+
+            answers.add(polished?.sentence ?: localDraft)
+            nextGroupKey = question.defaultNextGroupKey
+            customInput = ""
+            if (questionIndex + 1 >= questionLimit) {
+                finishNormally(answers.toList())
+            } else {
+                questionIndex += 1
+            }
         }
     }
 
@@ -869,20 +885,25 @@ TestDatePicker(recordDate, { recordDate = it })
                 } else {
                     Text(question.title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
                     question.options.forEach { option ->
-                        OutlinedSoftButton(option.label) { submitAnswer(option) }
+                        OutlinedSoftButton(option.label, enabled = !customAnswerLoading) { submitAnswer(option) }
                     }
                     HaruTextField(
                         value = customInput,
                         onValueChange = { customInput = it },
                         label = "기타(입력)",
+                        enabled = !customAnswerLoading,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(onDone = { submitCustomAnswer() })
                     )
-                    PrimaryButton("기타로 남기기", enabled = customInput.isNotBlank()) {
+                    PrimaryButton(
+                        if (customAnswerLoading) "문장 다듬는 중..." else "기타로 남기기",
+                        enabled = customInput.isNotBlank() && !customAnswerLoading
+                    ) {
                         submitCustomAnswer()
                     }
                 }
                 TextButton(
+                    enabled = !customAnswerLoading,
                     onClick = {
                         keyboardController?.hide()
                         focusManager.clearFocus()
@@ -900,7 +921,11 @@ TestDatePicker(recordDate, { recordDate = it })
                     Text("취소", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f))
                 }
                 if (questionIndex > 0) {
-                    TextButton(onClick = { finishNormally(answers.toList()) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                    TextButton(
+                        enabled = !customAnswerLoading,
+                        onClick = { finishNormally(answers.toList()) },
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    ) {
                         Text("여기까지", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
@@ -1722,6 +1747,7 @@ fun HaruTextField(
     onValueChange: (String) -> Unit,
     label: String,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     keyboardActions: KeyboardActions = KeyboardActions()
 ) {
@@ -1731,6 +1757,7 @@ fun HaruTextField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
+        enabled = enabled,
         label = { Text(label) },
         modifier = modifier
             .fillMaxWidth()
@@ -1767,9 +1794,10 @@ fun PrimaryButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
 }
 
 @Composable
-fun OutlinedSoftButton(text: String, onClick: () -> Unit) {
+fun OutlinedSoftButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
     OutlinedButton(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier.fillMaxWidth().height(50.dp),
         shape = RoundedCornerShape(22.dp),
         colors = ButtonDefaults.outlinedButtonColors(containerColor = Paper, contentColor = Ink)

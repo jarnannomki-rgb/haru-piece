@@ -27,6 +27,7 @@ object DiarySentenceEngine {
 
         val phrase = stripLeadingSelf(normalizePoliteEnding(input))
         negativeSentence(phrase, question)?.let { return polish(it) }
+        QuestionAwareFallback.fromCustomAnswer(input, question)?.let { return polish(it) }
         sentenceFromOptionFrame(input, phrase, question)?.let { return polish(it) }
 
         val context = detectContext(phrase, question)
@@ -269,17 +270,7 @@ object DiarySentenceEngine {
     }
 
     fun looksSuspicious(rawAnswer: String, question: Question): Boolean {
-        if (looksSuspicious(rawAnswer)) return true
-        val phrase = stripLeadingSelf(normalizePoliteEnding(cleanInput(rawAnswer)))
-        val compact = phrase.replace(" ", "")
-        if (compact.length !in 2..4) return false
-        val context = detectContext(phrase, question)
-        return when (context) {
-            "weather" -> !compact.hasAny("좋", "별로", "맑", "흐", "비", "눈", "더", "추", "바람", "습", "선선", "쌀쌀", "따뜻", "덥", "춥")
-            "mood" -> !compact.hasAny("좋", "나쁘", "별로", "행복", "우울", "평온", "그럭", "짜증", "화", "걱정", "괜찮", "기쁨", "슬픔")
-            "condition" -> !compact.hasAny("좋", "별로", "피곤", "힘들", "괜찮", "아픔", "아파", "무거", "가벼", "졸림")
-            else -> false
-        }
+        return looksSuspicious(rawAnswer)
     }
 
     private fun detectContext(phrase: String, question: Question): String {
@@ -328,6 +319,9 @@ object DiarySentenceEngine {
     private fun negativeSentence(phrase: String, question: Question): String? {
         val compact = phrase.replace(" ", "")
         if (compact !in negativeWords) return null
+        if (question.title.contains("예정에 없던 만남")) {
+            return "오늘은 예정에 없던 만남이 생기지 않았다"
+        }
         return when (detectContext(phrase, question)) {
             "food" -> "오늘은 식사를 따로 남기지 않았다"
             "drink" -> "오늘은 따로 마신 것을 남기지 않았다"

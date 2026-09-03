@@ -18,8 +18,10 @@ captures/
 # Local test helpers
 *.log
 answer_engine_lab_log.jsonl
+groq_answer_lab_log.jsonl
 answer_engine_option_cache.json
 tools/__pycache__/
+supabase/.temp/
 
 # Secrets
 *.jks
