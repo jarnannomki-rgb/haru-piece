@@ -15,6 +15,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -271,6 +274,25 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
     val shouldShowTopicDetailFollowUp = canShowTopicPrompt && profile!!.topics.isNotEmpty() && pendingDetailTopic != null && recordedDays >= nextDetailDay
     val shouldShowTopicExpansionFollowUp = canShowTopicPrompt && profile!!.topics.size in 1..2 && pendingDetailTopic == null
 
+    LaunchedEffect(profile, entries.size) {
+        val savedProfile = profile ?: return@LaunchedEffect
+        val questionLimit = when {
+            entries.size >= 10 -> 4
+            entries.size >= 6 -> 3
+            entries.size >= 3 -> 2
+            else -> 1
+        }
+        fetchDbQuestion(
+            context = context,
+            profile = savedProfile,
+            entries = entries,
+            recordDate = LocalDate.now(),
+            step = 1,
+            questionLimit = questionLimit,
+            groupKey = null
+        )
+    }
+
     LaunchedEffect(profile?.notifyTimes) {
         profile?.let { scheduleDiaryReminders(context, it.notifyTimes) }
     }
@@ -283,7 +305,7 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
             launchDone = true
         }
     } else if (!launchDone) {
-        SplashScreen { launchDone = true }
+        IntroQuestionScreen { launchDone = true }
     } else if (shouldShowTopicFollowUp) {
         if (topicFollowUpStage == "select") {
             TopicScreen(followUpTopics) {
@@ -474,13 +496,13 @@ fun IntroQuestionScreen(onDone: () -> Unit) {
 
     LaunchedEffect(Unit) {
         coroutineScope {
-            launch { alpha.animateTo(1f, animationSpec = tween(720)) }
-            launch { offsetY.animateTo(0f, animationSpec = tween(720)) }
+            launch { alpha.animateTo(1f, animationSpec = tween(480)) }
+            launch { offsetY.animateTo(0f, animationSpec = tween(480)) }
         }
-        delay(850)
+        delay(480)
         coroutineScope {
-            launch { alpha.animateTo(0f, animationSpec = tween(620)) }
-            launch { offsetY.animateTo(-14f, animationSpec = tween(620)) }
+            launch { alpha.animateTo(0f, animationSpec = tween(440)) }
+            launch { offsetY.animateTo(-14f, animationSpec = tween(440)) }
         }
         onDone()
     }
@@ -1029,25 +1051,61 @@ TestDatePicker(recordDate, { recordDate = it })
                 }
             }
             "done" -> WhitePanel {
-                LaunchedEffect(Unit) {
-                    delay(1_500)
-                    onMoveCalendar()
-                }
-                GatheringPieceCluster()
-                Text("오늘도 한 조각이 쌓였어요.", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
-                Text("잠시 후 달력에서 오늘의 조각을 보여드릴게요.", color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 22.sp)
-                PrimaryButton("달력 보기") { onMoveCalendar() }
+                CompletionContent(
+                    sentence = polishDiaryText(draft),
+                    onConfirm = onMoveCalendar
+                )
             }
             "restDone" -> WhitePanel {
-                LaunchedEffect(Unit) {
-                    delay(1_500)
-                    onMoveCalendar()
-                }
-                GatheringPieceCluster()
-                Text("오늘 하루 푹 쉬세요.", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
-                Text("쉬어가기로 한 마음도 오늘의 기록으로 남겨둘게요.", color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 22.sp)
-                PrimaryButton("달력 보기") { onMoveCalendar() }
+                CompletionContent(
+                    sentence = "오늘은 아무것도 남기지 않고 싶은 하루였다.",
+                    onConfirm = onMoveCalendar
+                )
             }
+        }
+    }
+}
+
+@Composable
+fun CompletionContent(sentence: String, onConfirm: () -> Unit) {
+    var showSentence by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        delay(1_350)
+        showSentence = true
+    }
+
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        GatheringPieceCluster(durationMillis = 1_600)
+    }
+    AnimatedVisibility(
+        visible = showSentence,
+        enter = fadeIn(animationSpec = tween(480)) + scaleIn(
+            initialScale = 0.96f,
+            animationSpec = tween(480)
+        )
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Text(
+                "오늘의 조각",
+                color = CoralDark,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                sentence,
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+                lineHeight = 32.sp,
+                textAlign = TextAlign.Center
+            )
+            PrimaryButton("확인", onClick = onConfirm)
         }
     }
 }
@@ -1901,14 +1959,14 @@ fun PieceCluster() {
 }
 
 @Composable
-fun GatheringPieceCluster() {
+fun GatheringPieceCluster(durationMillis: Int = 1_600) {
     val progress = remember { Animatable(0f) }
     val density = LocalDensity.current
     val distance = with(density) { 62.dp.toPx() }
 
     LaunchedEffect(Unit) {
         progress.snapTo(0f)
-        progress.animateTo(1f, animationSpec = tween(durationMillis = 760))
+        progress.animateTo(1f, animationSpec = tween(durationMillis = durationMillis))
     }
 
     val value = progress.value
