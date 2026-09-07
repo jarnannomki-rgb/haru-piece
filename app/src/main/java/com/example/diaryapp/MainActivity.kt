@@ -764,6 +764,8 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     }
 
     fun cancelQuestionFlow() {
+        val prefetchedFirstQuestion = dbQuestions[0]
+        val firstQuestionResolved = resolvedQuestions[0] == true
         keyboardController?.hide()
         focusManager.clearFocus()
         answers.clear()
@@ -771,6 +773,10 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         customAnswerLoading = false
         dbQuestions.clear()
         resolvedQuestions.clear()
+        if (firstQuestionResolved) {
+            prefetchedFirstQuestion?.let { dbQuestions[0] = it }
+            resolvedQuestions[0] = true
+        }
         missedDbRequests.clear()
         nextGroupKey = null
         questionIndex = 0
@@ -823,6 +829,21 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         }
     }
 
+    val firstQuestionRequestKey = listOf(
+        recordDate.toString(),
+        entries.size.toString(),
+        questionLimit.toString(),
+        profile.topics.sorted().joinToString("|")
+    ).joinToString("|")
+    LaunchedEffect(firstQuestionRequestKey) {
+        if (mode != "start") return@LaunchedEffect
+        dbQuestions.remove(0)
+        resolvedQuestions.remove(0)
+        val prefetched = fetchDbQuestion(context, profile, entries, recordDate, 1, questionLimit, null)
+        if (prefetched != null) dbQuestions[0] = prefetched
+        resolvedQuestions[0] = true
+    }
+
     LaunchedEffect(mode, questionIndex, recordDate, nextGroupKey, entries.size) {
         if (mode == "question" && resolvedQuestions[questionIndex] != true && !questionLoading) {
             val requestKey = listOf(recordDate.format(DateFormatter), questionIndex.toString(), nextGroupKey ?: "start", entries.size.toString()).joinToString("|")
@@ -837,6 +858,42 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
             }
             resolvedQuestions[questionIndex] = true
             questionLoading = false
+        }
+    }
+    LaunchedEffect(mode, questionIndex, currentQuestion?.key, recordDate, entries.size, questionLimit) {
+        val question = currentQuestion
+        if (mode == "question" && question != null && questionIndex + 1 < questionLimit) {
+            val nextGroups = question.options.mapNotNull { option ->
+                option.nextGroupKey ?: question.defaultNextGroupKey
+            }
+            prefetchDbNextQuestions(
+                context = context,
+                profile = profile,
+                entries = entries,
+                recordDate = recordDate,
+                step = questionIndex + 2,
+                questionLimit = questionLimit,
+                groupKeys = nextGroups
+            )
+        }
+    }
+    LaunchedEffect(mode, questionIndex, customInput.isNotBlank(), currentQuestion?.key, recordDate, entries.size, questionLimit) {
+        val question = currentQuestion
+        if (
+            mode == "question" &&
+            question != null &&
+            customInput.isNotBlank() &&
+            questionIndex + 1 < questionLimit
+        ) {
+            fetchDbQuestion(
+                context = context,
+                profile = profile,
+                entries = entries,
+                recordDate = recordDate,
+                step = questionIndex + 2,
+                questionLimit = questionLimit,
+                groupKey = question.defaultNextGroupKey
+            )
         }
     }
     BackHandler(enabled = mode != "start") {
