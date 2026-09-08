@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -43,6 +44,7 @@
             </intent-filter>
             <intent-filter>
                 <action android:name="com.example.diaryapp.action.QUICK_RECORD" />
+                <action android:name="com.example.diaryapp.action.WEEKLY_RECAP" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <meta-data
@@ -52,5 +54,3 @@
     </application>
 
 </manifest>
-
-

@@ -15,9 +15,14 @@ import java.util.Calendar
 
 private const val REMINDER_CHANNEL_ID = "haru_piece_reminders_high"
 private const val REMINDER_REQUEST_BASE = 41000
+private const val WEEKLY_RECAP_REQUEST = 41999
+private const val WEEKLY_RECAP_NOTIFICATION_ID = 42000
+private const val ACTION_WEEKLY_RECAP_ALARM = "com.example.diaryapp.action.WEEKLY_RECAP_ALARM"
 private const val MAX_REMINDER_COUNT = 64
 const val ACTION_QUICK_RECORD = "com.example.diaryapp.action.QUICK_RECORD"
 const val EXTRA_QUICK_RECORD = "quick_record"
+const val ACTION_WEEKLY_RECAP = "com.example.diaryapp.action.WEEKLY_RECAP"
+const val EXTRA_WEEKLY_RECAP = "weekly_recap"
 
 data class ReminderSpec(
     val raw: String,
@@ -30,6 +35,10 @@ class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
             loadProfile(context)?.let { scheduleDiaryReminders(context, it.notifyTimes) }
+            return
+        }
+        if (intent.action == ACTION_WEEKLY_RECAP_ALARM) {
+            showWeeklyRecapNotification(context)
             return
         }
 
@@ -62,11 +71,29 @@ fun scheduleDiaryReminders(context: Context, reminders: List<String>) {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        if (Build.VERSION.SDK_INT < 31 || alarmManager.canScheduleExactAlarms()) {
-            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-        } else {
-            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-        }
+        scheduleAlarm(alarmManager, triggerAt, pendingIntent)
+    }
+}
+
+fun scheduleWeeklyRecapTest(context: Context) {
+    ensureReminderChannel(context)
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val intent = Intent(context, ReminderReceiver::class.java).setAction(ACTION_WEEKLY_RECAP_ALARM)
+    val pendingIntent = PendingIntent.getBroadcast(
+        context,
+        WEEKLY_RECAP_REQUEST,
+        intent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    alarmManager.cancel(pendingIntent)
+    scheduleAlarm(alarmManager, System.currentTimeMillis() + 60_000L, pendingIntent)
+}
+
+private fun scheduleAlarm(alarmManager: AlarmManager, triggerAt: Long, pendingIntent: PendingIntent) {
+    if (Build.VERSION.SDK_INT < 31 || alarmManager.canScheduleExactAlarms()) {
+        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+    } else {
+        alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
     }
 }
 
@@ -139,16 +166,13 @@ private fun ensureReminderChannel(context: Context) {
     channel.enableVibration(true)
     notificationManager.createNotificationChannel(channel)
 }
+
 fun postDiaryReminderNow(context: Context) = showDiaryReminder(context)
 
 private fun showDiaryReminder(context: Context) {
-    if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-        return
-    }
-
+    if (!canPostNotifications(context)) return
     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     ensureReminderChannel(context)
-
     val openIntent = PendingIntent.getActivity(
         context,
         0,
@@ -158,7 +182,6 @@ private fun showDiaryReminder(context: Context) {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
-
     val notification = NotificationCompat.Builder(context, REMINDER_CHANNEL_ID)
         .setSmallIcon(R.mipmap.ic_launcher)
         .setContentTitle("하루조각")
@@ -170,6 +193,36 @@ private fun showDiaryReminder(context: Context) {
         .setDefaults(NotificationCompat.DEFAULT_ALL)
         .setPriority(NotificationCompat.PRIORITY_HIGH)
         .build()
-
     notificationManager.notify(REMINDER_REQUEST_BASE, notification)
 }
+
+private fun showWeeklyRecapNotification(context: Context) {
+    if (!canPostNotifications(context)) return
+    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    ensureReminderChannel(context)
+    val openIntent = PendingIntent.getActivity(
+        context,
+        WEEKLY_RECAP_REQUEST,
+        Intent(context, MainActivity::class.java)
+            .setAction(ACTION_WEEKLY_RECAP)
+            .putExtra(EXTRA_WEEKLY_RECAP, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    val notification = NotificationCompat.Builder(context, REMINDER_CHANNEL_ID)
+        .setSmallIcon(R.mipmap.ic_launcher)
+        .setContentTitle("한 주의 조각이 모였어요")
+        .setContentText("함께 돌아볼까요?")
+        .setContentIntent(openIntent)
+        .setAutoCancel(true)
+        .setCategory(NotificationCompat.CATEGORY_REMINDER)
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+        .setDefaults(NotificationCompat.DEFAULT_ALL)
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .build()
+    notificationManager.notify(WEEKLY_RECAP_NOTIFICATION_ID, notification)
+}
+
+private fun canPostNotifications(context: Context): Boolean =
+    Build.VERSION.SDK_INT < 33 ||
+        context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED

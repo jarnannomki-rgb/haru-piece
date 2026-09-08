@@ -9,7 +9,7 @@ import android.net.Uri
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -197,12 +197,14 @@ fun colorSchemeFor(theme: String) = when (theme) {
     else -> HaruColorScheme
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val quickRecordRequested = mutableStateOf(false)
+    private val weeklyRecapRequested = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         quickRecordRequested.value = isQuickRecordIntent(intent)
+        weeklyRecapRequested.value = isWeeklyRecapIntent(intent)
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
@@ -217,7 +219,9 @@ class MainActivity : ComponentActivity() {
                         saveTheme(context, it)
                     },
                     quickRecordRequested = quickRecordRequested.value,
-                    onQuickRecordConsumed = { quickRecordRequested.value = false }
+                    onQuickRecordConsumed = { quickRecordRequested.value = false },
+                    weeklyRecapRequested = weeklyRecapRequested.value,
+                    onWeeklyRecapConsumed = { weeklyRecapRequested.value = false }
                 )
             }
         }
@@ -227,11 +231,16 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (isQuickRecordIntent(intent)) quickRecordRequested.value = true
+        if (isWeeklyRecapIntent(intent)) weeklyRecapRequested.value = true
     }
 
     private fun isQuickRecordIntent(intent: Intent?): Boolean =
         intent?.action == ACTION_QUICK_RECORD ||
             intent?.getBooleanExtra(EXTRA_QUICK_RECORD, false) == true
+
+    private fun isWeeklyRecapIntent(intent: Intent?): Boolean =
+        intent?.action == ACTION_WEEKLY_RECAP ||
+            intent?.getBooleanExtra(EXTRA_WEEKLY_RECAP, false) == true
 }
 
 data class Profile(
@@ -278,14 +287,18 @@ fun HaruPieceApp(
     themeName: String,
     onThemeChange: (String) -> Unit,
     quickRecordRequested: Boolean,
-    onQuickRecordConsumed: () -> Unit
+    onQuickRecordConsumed: () -> Unit,
+    weeklyRecapRequested: Boolean,
+    onWeeklyRecapConsumed: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = context as FragmentActivity
     val lifecycleOwner = LocalLifecycleOwner.current
+    val coroutineScope = rememberCoroutineScope()
     var profile by remember { mutableStateOf(loadProfile(context)) }
-    var launchDone by remember { mutableStateOf(quickRecordRequested) }
-    LaunchedEffect(quickRecordRequested) {
-        if (quickRecordRequested) launchDone = true
+    var launchDone by remember { mutableStateOf(quickRecordRequested || weeklyRecapRequested) }
+    LaunchedEffect(quickRecordRequested, weeklyRecapRequested) {
+        if (quickRecordRequested || weeklyRecapRequested) launchDone = true
     }
     var appUnlocked by remember { mutableStateOf(!isAppLockEnabled(context)) }
     var backgroundedAt by remember { mutableStateOf<Long?>(null) }
@@ -293,6 +306,8 @@ fun HaruPieceApp(
     var topicFollowUpStage by remember { mutableStateOf("prompt") }
     var topicDetailStage by remember { mutableStateOf("prompt") }
     var topicExpansionStage by remember { mutableStateOf("prompt") }
+    var pendingCompletedEntry by remember { mutableStateOf<DiaryEntry?>(null) }
+    var selectedMainTab by remember { mutableStateOf("오늘") }
     val entries = remember { mutableStateListOf<DiaryEntry>().also { it.addAll(loadEntries(context)) } }
     val followUpTopics = remember(profile?.topics) { mutableStateListOf<String>().also { it.addAll(profile?.topics.orEmpty()) } }
     val pendingDetailTopic = profile?.topics?.firstOrNull { profile?.topicDetails?.get(it).isNullOrEmpty() }
@@ -359,12 +374,20 @@ fun HaruPieceApp(
     } else if (!launchDone) {
         IntroQuestionScreen { launchDone = true }
     } else if (!appUnlocked && isAppLockEnabled(context)) {
-        AppLockScreen { appUnlocked = true }
+        AppLockScreen(activity) { appUnlocked = true }
+    } else if (weeklyRecapRequested) {
+        WeeklyRecapScreen(
+            entries = entries,
+            onClose = {
+                onWeeklyRecapConsumed()
+                selectedMainTab = "달력"
+            }
+        )
     } else if (shouldShowTopicFollowUp) {
         if (topicFollowUpStage == "select") {
             TopicScreen(followUpTopics) {
                 val savedProfile = if (followUpTopics.isNotEmpty()) {
-                    profile!!.copy(topics = followUpTopics.distinct(), topicPromptDismissedDay = 0)
+                    profile!!.copy(topics = followUpTopics.distinct(), topicPromptDismissedDay = recordedDays)
                 } else {
                     profile!!.copy(topicPromptDismissedDay = recordedDays)
                 }
@@ -450,13 +473,34 @@ fun HaruPieceApp(
                 }
             )
         }
+    } else if (pendingCompletedEntry != null) {
+        val completed = pendingCompletedEntry!!
+        BackHandler {
+            pendingCompletedEntry = null
+            selectedMainTab = "달력"
+        }
+        AppScreen("하루조각", completed.date) {
+            WhitePanel {
+                CompletionContent(
+                    sentence = completed.text,
+                    onShare = { coroutineScope.launch { shareDiaryEntry(context, completed) } },
+                    onConfirm = {
+                        pendingCompletedEntry = null
+                        selectedMainTab = "달력"
+                    }
+                )
+            }
+        }
     } else {
         MainTabs(
             profile = profile!!,
+            selectedTab = selectedMainTab,
+            onSelectedTabChange = { selectedMainTab = it },
             entries = entries,
             onSaveEntry = { entry ->
                 entries.add(entry)
                 saveEntries(context, entries)
+                pendingCompletedEntry = entry
             },
             onUpdateEntry = { updated ->
                 val index = entries.indexOfFirst { it.id == updated.id }
@@ -498,6 +542,8 @@ fun HaruPieceApp(
                 clearHaruPieceTestData(context)
                 clearAppLock(context)
                 entries.clear()
+                pendingCompletedEntry = null
+                selectedMainTab = "오늘"
                 profile = null
                 launchDone = false
                 appUnlocked = true
@@ -778,6 +824,8 @@ fun NotificationScreen(notifyTimes: MutableList<String>, onComplete: () -> Unit)
 fun MainTabs(
     profile: Profile,
     entries: List<DiaryEntry>,
+    selectedTab: String,
+    onSelectedTabChange: (String) -> Unit,
     onSaveEntry: (DiaryEntry) -> Unit,
     onUpdateEntry: (DiaryEntry) -> Unit,
     onDeleteEntry: (DiaryEntry) -> Unit,
@@ -790,13 +838,12 @@ fun MainTabs(
     onLockChanged: (Boolean) -> Unit,
     onReset: () -> Unit
 ) {
-    var selectedTab by remember { mutableStateOf("오늘") }
     LaunchedEffect(quickRecordRequested) {
-        if (quickRecordRequested) selectedTab = "오늘"
+        if (quickRecordRequested) onSelectedTabChange("오늘")
     }
     val density = LocalDensity.current
     val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
-    BackHandler(enabled = selectedTab != "달력") { selectedTab = "달력" }
+    BackHandler(enabled = selectedTab != "달력") { onSelectedTabChange("달력") }
 
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Box(modifier = Modifier.weight(1f)) {
@@ -809,7 +856,7 @@ fun MainTabs(
                     onReset = onReset,
                     quickRecordRequested = quickRecordRequested,
                     onQuickRecordConsumed = onQuickRecordConsumed,
-                    onMoveCalendar = { selectedTab = "달력" }
+                    onMoveCalendar = { onSelectedTabChange("달력") }
                 )
                 "달력" -> CalendarScreen(entries, onUpdateEntry, onDeleteEntry)
                 "검색" -> SearchScreen(entries)
@@ -821,7 +868,7 @@ fun MainTabs(
                     onRestoreData = onRestoreData,
                     onThemeChange = onThemeChange,
                     onLockChanged = onLockChanged,
-                    onMoveCalendar = { selectedTab = "달력" }
+                    onMoveCalendar = { onSelectedTabChange("달력") }
                 )
             }
         }
@@ -830,7 +877,7 @@ fun MainTabs(
                 listOf("오늘", "달력", "검색", "설정").forEach { tab ->
                 NavigationBarItem(
                     selected = selectedTab == tab,
-                    onClick = { selectedTab = tab },
+                    onClick = { onSelectedTabChange(tab) },
                     icon = { Spacer(Modifier.size(0.dp)) },
                     label = { Text(tab) },
                     colors = NavigationBarItemDefaults.colors(
@@ -1445,7 +1492,6 @@ fun CalendarScreen(
     }
 
     AppScreen("달력", "조각이 남은 날은 은은하게 표시돼요.") {
-        WeeklyPieceSummary(selectedDate, entries)
         WhitePanel {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1507,91 +1553,6 @@ fun CalendarScreen(
     }
 }
 
-@Composable
-fun WeeklyPieceSummary(anchorDate: LocalDate, entries: List<DiaryEntry>) {
-    val monday = anchorDate.minusDays((anchorDate.dayOfWeek.value - 1).toLong())
-    val days = (0L..6L).map(monday::plusDays)
-    val byDate = entries.groupBy { it.date }
-    val recordedDays = days.count { byDate[it.format(DateFormatter)].orEmpty().isNotEmpty() }
-    val photoCount = days.sumOf { day ->
-        byDate[day.format(DateFormatter)].orEmpty().count { it.photoUri != null }
-    }
-    val shortDate = DateTimeFormatter.ofPattern("M.d")
-
-    WhitePanel {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text("주간 조각 모음", fontWeight = FontWeight.Bold, fontSize = 19.sp)
-                Text(
-                    "${monday.format(shortDate)} - ${monday.plusDays(6).format(shortDate)}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp
-                )
-            }
-            Text(
-                "${recordedDays}일",
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            days.forEach { day ->
-                val hasEntry = byDate[day.format(DateFormatter)].orEmpty().isNotEmpty()
-                val isSelected = day == anchorDate
-                Column(
-                    modifier = Modifier.weight(1f),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        listOf("월", "화", "수", "목", "금", "토", "일")[day.dayOfWeek.value - 1],
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(42.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(
-                                when {
-                                    isSelected && hasEntry -> Coral
-                                    isSelected -> PeachSoft
-                                    hasEntry -> Mint
-                                    else -> MaterialTheme.colorScheme.background
-                                }
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (hasEntry) {
-                            Box(
-                                Modifier
-                                    .size(14.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(if (isSelected) Color.White else Coral.copy(alpha = 0.72f))
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        Text(
-            if (recordedDays == 0) "이번 주의 첫 조각을 기다리고 있어요."
-            else "이번 주에는 ${recordedDays}일의 하루를 남겼어요." +
-                if (photoCount > 0) " 사진도 ${photoCount}장 함께 있어요." else "",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 13.sp,
-            lineHeight = 20.sp
-        )
-    }
-}
 @Composable
 fun CalendarGrid(month: YearMonth, byDate: Map<String, List<DiaryEntry>>, selectedDate: LocalDate, onSelect: (LocalDate) -> Unit) {
     val first = month.atDay(1)
@@ -1769,6 +1730,7 @@ fun SettingsScreen(
     val coroutineScope = rememberCoroutineScope()
     var section by remember { mutableStateOf("menu") }
     var backupMessage by remember { mutableStateOf<String?>(null) }
+    var weeklyPushMessage by remember { mutableStateOf<String?>(null) }
     var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
     var restoreRunning by remember { mutableStateOf(false) }
     val currentTime = remember { currentReminderTimeParts() }
@@ -1878,6 +1840,19 @@ fun SettingsScreen(
                 OutlinedSoftButton("알림 테스트") { postDiaryReminderNow(context) }
             }
         }
+        "weeklyPush" -> AppScreen("조각 푸쉬", "주간 조각 알림을 실제처럼 확인해요.") {
+            WhitePanel {
+                TextButton(onClick = { section = "menu" }) { Text("설정으로") }
+                Text("버튼을 누르면 1분 뒤 알림이 와요. 알림을 누르면 이번 주의 조각이 열려요.", color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 22.sp)
+                PrimaryButton("조각 푸쉬") {
+                    scheduleWeeklyRecapTest(context)
+                    weeklyPushMessage = "1분 뒤에 알림을 보낼게요."
+                }
+                weeklyPushMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                }
+            }
+        }
         "theme" -> AppScreen("분위기", "오늘 보기 좋은 화면 톤을 골라주세요.") {
             WhitePanel {
                 TextButton(onClick = { section = "menu" }) { Text("설정으로") }
@@ -1904,7 +1879,7 @@ fun SettingsScreen(
             WhitePanel {
                 TextButton(onClick = { section = "menu" }) { Text("설정으로") }
                 Text(
-                    "백업 파일에는 프로필, 기록 문장, 사진이 함께 들어가요. 잠금 번호는 포함하지 않아요.",
+                    "백업 파일에는 프로필, 기록 문장, 사진이 함께 들어가요. 앱 잠금 설정은 포함하지 않아요.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp,
                     lineHeight = 21.sp
@@ -1932,12 +1907,13 @@ fun SettingsScreen(
         else -> AppScreen("설정", "${profile.name}님의 하루조각") {
             WhitePanel {
                 SettingRow("알람", "${profile.notifyTimes.size}개의 기록 알림", onClick = { section = "alarm" })
+                SettingRow("조각 푸쉬", "1분 뒤 주간 조각 알림 테스트", onClick = { section = "weeklyPush" })
                 SettingRow("분위기", themeName, onClick = { section = "theme" })
                 SettingRow("자주 남기고 싶은 것", topicSummary(profile.topics), onClick = { section = "topics" })
                 SettingRow("백업과 복원", "${entries.size}개의 기록 보관", onClick = { section = "backup" })
                 SettingRow(
                     "앱 잠금",
-                    if (isAppLockEnabled(context)) "잠금 번호 사용 중" else "사용하지 않음",
+                    if (isAppLockEnabled(context)) "휴대폰 잠금 사용 중" else "사용하지 않음",
                     onClick = { section = "lock" }
                 )
             }
@@ -2744,9 +2720,3 @@ fun saveEntries(context: Context, entries: List<DiaryEntry>) {
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         .edit().putString("entries", array.toString()).apply()
 }
-
-
-
-
-
-

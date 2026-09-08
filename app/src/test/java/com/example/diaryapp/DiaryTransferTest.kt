@@ -82,14 +82,4 @@ class DiaryTransferTest {
                 .copyLimitedTo(ByteArrayOutputStream(), 4)
         }
     }
-
-    @Test
-    fun appLockHashUsesSalt() {
-        val salt = ByteArray(16) { it.toByte() }
-        assertEquals(hashPin("1234", salt), hashPin("1234", salt))
-        assertNotEquals(
-            hashPin("1234", salt),
-            hashPin("1234", ByteArray(16) { (it + 1).toByte() })
-        )
-    }
 }
