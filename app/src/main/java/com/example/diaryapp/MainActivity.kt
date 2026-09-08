@@ -66,6 +66,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -86,6 +87,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
@@ -96,6 +98,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -194,8 +198,11 @@ fun colorSchemeFor(theme: String) = when (theme) {
 }
 
 class MainActivity : ComponentActivity() {
+    private val quickRecordRequested = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        quickRecordRequested.value = isQuickRecordIntent(intent)
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
@@ -208,11 +215,23 @@ class MainActivity : ComponentActivity() {
                     onThemeChange = {
                         themeName = it
                         saveTheme(context, it)
-                    }
+                    },
+                    quickRecordRequested = quickRecordRequested.value,
+                    onQuickRecordConsumed = { quickRecordRequested.value = false }
                 )
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (isQuickRecordIntent(intent)) quickRecordRequested.value = true
+    }
+
+    private fun isQuickRecordIntent(intent: Intent?): Boolean =
+        intent?.action == ACTION_QUICK_RECORD ||
+            intent?.getBooleanExtra(EXTRA_QUICK_RECORD, false) == true
 }
 
 data class Profile(
@@ -230,7 +249,8 @@ data class DiaryEntry(
     val time: String,
     val text: String,
     val kind: String,
-    val photoUri: String? = null
+    val photoUri: String? = null,
+    val id: String = UUID.randomUUID().toString()
 )
 
 data class AnswerOption(
@@ -254,10 +274,21 @@ data class Question(
 )
 
 @Composable
-fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
+fun HaruPieceApp(
+    themeName: String,
+    onThemeChange: (String) -> Unit,
+    quickRecordRequested: Boolean,
+    onQuickRecordConsumed: () -> Unit
+) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var profile by remember { mutableStateOf(loadProfile(context)) }
-    var launchDone by remember { mutableStateOf(false) }
+    var launchDone by remember { mutableStateOf(quickRecordRequested) }
+    LaunchedEffect(quickRecordRequested) {
+        if (quickRecordRequested) launchDone = true
+    }
+    var appUnlocked by remember { mutableStateOf(!isAppLockEnabled(context)) }
+    var backgroundedAt by remember { mutableStateOf<Long?>(null) }
     var topicFollowUpDismissed by remember { mutableStateOf(false) }
     var topicFollowUpStage by remember { mutableStateOf("prompt") }
     var topicDetailStage by remember { mutableStateOf("prompt") }
@@ -297,6 +328,27 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
         profile?.let { scheduleDiaryReminders(context, it.notifyTimes) }
     }
 
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> backgroundedAt = System.currentTimeMillis()
+                Lifecycle.Event.ON_START -> {
+                    val leftAt = backgroundedAt
+                    if (
+                        leftAt != null &&
+                        System.currentTimeMillis() - leftAt >= 30_000L &&
+                        isAppLockEnabled(context)
+                    ) {
+                        appUnlocked = false
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     if (profile == null) {
         OnboardingFlow { savedProfile ->
             profile = savedProfile
@@ -306,6 +358,8 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
         }
     } else if (!launchDone) {
         IntroQuestionScreen { launchDone = true }
+    } else if (!appUnlocked && isAppLockEnabled(context)) {
+        AppLockScreen { appUnlocked = true }
     } else if (shouldShowTopicFollowUp) {
         if (topicFollowUpStage == "select") {
             TopicScreen(followUpTopics) {
@@ -404,8 +458,20 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
                 entries.add(entry)
                 saveEntries(context, entries)
             },
+            onUpdateEntry = { updated ->
+                val index = entries.indexOfFirst { it.id == updated.id }
+                if (index >= 0) {
+                    val previous = entries[index]
+                    entries[index] = updated
+                    if (previous.photoUri != updated.photoUri) {
+                        deleteOwnedEntryPhoto(context, previous.photoUri)
+                    }
+                    saveEntries(context, entries)
+                }
+            },
             onDeleteEntry = { entry ->
-                entries.remove(entry)
+                entries.removeAll { it.id == entry.id }
+                deleteOwnedEntryPhoto(context, entry.photoUri)
                 saveEntries(context, entries)
             },
             onSaveProfile = { savedProfile ->
@@ -413,14 +479,28 @@ fun HaruPieceApp(themeName: String, onThemeChange: (String) -> Unit) {
                 saveProfile(context, savedProfile)
                 scheduleDiaryReminders(context, savedProfile.notifyTimes)
             },
+            onRestoreData = { restored ->
+                profile = restored.profile
+                entries.clear()
+                entries.addAll(restored.entries)
+                saveProfile(context, restored.profile)
+                saveEntries(context, entries)
+                scheduleDiaryReminders(context, restored.profile.notifyTimes)
+                onThemeChange(restored.theme)
+            },
             themeName = themeName,
             onThemeChange = onThemeChange,
+            quickRecordRequested = quickRecordRequested,
+            onQuickRecordConsumed = onQuickRecordConsumed,
+            onLockChanged = { appUnlocked = true },
             onReset = {
                 scheduleDiaryReminders(context, emptyList())
                 clearHaruPieceTestData(context)
+                clearAppLock(context)
                 entries.clear()
                 profile = null
                 launchDone = false
+                appUnlocked = true
                 topicFollowUpDismissed = false
                 topicFollowUpStage = "prompt"
                 topicDetailStage = "prompt"
@@ -699,13 +779,21 @@ fun MainTabs(
     profile: Profile,
     entries: List<DiaryEntry>,
     onSaveEntry: (DiaryEntry) -> Unit,
+    onUpdateEntry: (DiaryEntry) -> Unit,
     onDeleteEntry: (DiaryEntry) -> Unit,
     onSaveProfile: (Profile) -> Unit,
+    onRestoreData: (RestoredDiaryData) -> Unit,
     themeName: String,
     onThemeChange: (String) -> Unit,
+    quickRecordRequested: Boolean,
+    onQuickRecordConsumed: () -> Unit,
+    onLockChanged: (Boolean) -> Unit,
     onReset: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf("오늘") }
+    LaunchedEffect(quickRecordRequested) {
+        if (quickRecordRequested) selectedTab = "오늘"
+    }
     val density = LocalDensity.current
     val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
     BackHandler(enabled = selectedTab != "달력") { selectedTab = "달력" }
@@ -713,10 +801,28 @@ fun MainTabs(
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Box(modifier = Modifier.weight(1f)) {
             when (selectedTab) {
-                "오늘" -> TodayScreen(profile, entries, onSaveEntry, onSaveProfile, onReset) { selectedTab = "달력" }
-                "달력" -> CalendarScreen(entries, onDeleteEntry)
+                "오늘" -> TodayScreen(
+                    profile = profile,
+                    entries = entries,
+                    onSaveEntry = onSaveEntry,
+                    onSaveProfile = onSaveProfile,
+                    onReset = onReset,
+                    quickRecordRequested = quickRecordRequested,
+                    onQuickRecordConsumed = onQuickRecordConsumed,
+                    onMoveCalendar = { selectedTab = "달력" }
+                )
+                "달력" -> CalendarScreen(entries, onUpdateEntry, onDeleteEntry)
                 "검색" -> SearchScreen(entries)
-                "설정" -> SettingsScreen(profile, themeName, onSaveProfile, onThemeChange) { selectedTab = "달력" }
+                "설정" -> SettingsScreen(
+                    profile = profile,
+                    entries = entries,
+                    themeName = themeName,
+                    onSaveProfile = onSaveProfile,
+                    onRestoreData = onRestoreData,
+                    onThemeChange = onThemeChange,
+                    onLockChanged = onLockChanged,
+                    onMoveCalendar = { selectedTab = "달력" }
+                )
             }
         }
         if (!isKeyboardVisible) {
@@ -742,7 +848,16 @@ fun MainTabs(
 }
 
 @Composable
-fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (DiaryEntry) -> Unit, onSaveProfile: (Profile) -> Unit, onReset: () -> Unit, onMoveCalendar: () -> Unit) {
+fun TodayScreen(
+    profile: Profile,
+    entries: List<DiaryEntry>,
+    onSaveEntry: (DiaryEntry) -> Unit,
+    onSaveProfile: (Profile) -> Unit,
+    onReset: () -> Unit,
+    quickRecordRequested: Boolean,
+    onQuickRecordConsumed: () -> Unit,
+    onMoveCalendar: () -> Unit
+) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -754,6 +869,7 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
     var draft by remember { mutableStateOf("") }
     var recordDate by remember { mutableStateOf(LocalDate.now()) }
     var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
+    var completedEntry by remember { mutableStateOf<DiaryEntry?>(null) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var showCustomInputWarning by remember { mutableStateOf(false) }
     var customAnswerLoading by remember { mutableStateOf(false) }
@@ -805,6 +921,24 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
         mode = "start"
     }
 
+    fun startQuestionFlow() {
+        val prefetchedFirstQuestion = dbQuestions[0]
+        val firstQuestionResolved = resolvedQuestions[0] == true
+        answers.clear()
+        questionIndex = 0
+        customInput = ""
+        selectedPhotoUri = null
+        dbQuestions.clear()
+        resolvedQuestions.clear()
+        if (firstQuestionResolved) {
+            prefetchedFirstQuestion?.let { dbQuestions[0] = it }
+            resolvedQuestions[0] = true
+        }
+        missedDbRequests.clear()
+        nextGroupKey = null
+        mode = "question"
+    }
+
     fun submitAnswer(option: AnswerOption) {
         val question = currentQuestion ?: return
         answers.add(DiarySentenceEngine.fromOption(option, question))
@@ -848,6 +982,13 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
             } else {
                 questionIndex += 1
             }
+        }
+    }
+
+    LaunchedEffect(quickRecordRequested) {
+        if (quickRecordRequested) {
+            if (mode == "start") startQuestionFlow()
+            onQuickRecordConsumed()
         }
     }
 
@@ -962,19 +1103,11 @@ fun TodayScreen(profile: Profile, entries: List<DiaryEntry>, onSaveEntry: (Diary
             "start" -> WhitePanel {
                 Text("오늘의 기억을 남겨볼까요?", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 36.sp)
 TestDatePicker(recordDate, { recordDate = it })
-                PrimaryButton("남겨볼게요") {
-                    answers.clear()
-                    questionIndex = 0
-                    customInput = ""
-                    selectedPhotoUri = null
-                    dbQuestions.clear()
-                    resolvedQuestions.clear()
-                    missedDbRequests.clear()
-                    nextGroupKey = null
-                    mode = "question"
-                }
+                PrimaryButton("남겨볼게요", onClick = ::startQuestionFlow)
                 OutlinedSoftButton("오늘은 쉴게요") {
-                    onSaveEntry(newEntry("오늘은 아무것도 남기지 않고 싶은 하루였다.", "rest", recordDate))
+                    val entry = newEntry("오늘은 아무것도 남기지 않고 싶은 하루였다.", "rest", recordDate)
+                    onSaveEntry(entry)
+                    completedEntry = entry
                     mode = "restDone"
                 }
                 TextButton(onClick = { showResetConfirm = true }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
@@ -1046,19 +1179,27 @@ TestDatePicker(recordDate, { recordDate = it })
                 PrimaryButton("확인", enabled = draft.isNotBlank()) {
                     keyboardController?.hide()
                     focusManager.clearFocus()
-                    onSaveEntry(newEntry(polishDiaryText(draft), "normal", recordDate, selectedPhotoUri))
+                    val entry = newEntry(polishDiaryText(draft), "normal", recordDate, selectedPhotoUri)
+                    onSaveEntry(entry)
+                    completedEntry = entry
                     mode = "done"
                 }
             }
             "done" -> WhitePanel {
                 CompletionContent(
                     sentence = polishDiaryText(draft),
+                    onShare = completedEntry?.let { entry ->
+                        { coroutineScope.launch { shareDiaryEntry(context, entry) } }
+                    },
                     onConfirm = onMoveCalendar
                 )
             }
             "restDone" -> WhitePanel {
                 CompletionContent(
                     sentence = "오늘은 아무것도 남기지 않고 싶은 하루였다.",
+                    onShare = completedEntry?.let { entry ->
+                        { coroutineScope.launch { shareDiaryEntry(context, entry) } }
+                    },
                     onConfirm = onMoveCalendar
                 )
             }
@@ -1067,7 +1208,7 @@ TestDatePicker(recordDate, { recordDate = it })
 }
 
 @Composable
-fun CompletionContent(sentence: String, onConfirm: () -> Unit) {
+fun CompletionContent(sentence: String, onShare: (() -> Unit)?, onConfirm: () -> Unit) {
     var showSentence by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -1105,6 +1246,7 @@ fun CompletionContent(sentence: String, onConfirm: () -> Unit) {
                 lineHeight = 32.sp,
                 textAlign = TextAlign.Center
             )
+            onShare?.let { OutlinedSoftButton("공유하기", onClick = it) }
             PrimaryButton("확인", onClick = onConfirm)
         }
     }
@@ -1176,12 +1318,33 @@ fun WhitePanel(content: @Composable ColumnScope.() -> Unit) {
 }
 
 @Composable
-fun CalendarScreen(entries: List<DiaryEntry>, onDeleteEntry: (DiaryEntry) -> Unit) {
+fun CalendarScreen(
+    entries: List<DiaryEntry>,
+    onUpdateEntry: (DiaryEntry) -> Unit,
+    onDeleteEntry: (DiaryEntry) -> Unit
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
     var selectedEntry by remember { mutableStateOf<DiaryEntry?>(null) }
+    var editingEntry by remember { mutableStateOf<DiaryEntry?>(null) }
+    var editText by remember { mutableStateOf("") }
+    var editPhotoUri by remember { mutableStateOf<String?>(null) }
+    var editMessage by remember { mutableStateOf<String?>(null) }
     val selectedKey = selectedDate.format(DateFormatter)
     val byDate = entries.groupBy { it.date }
+    val editPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val stored = savePhotoToAppStorage(context, uri)
+            if (stored != null) {
+                editPhotoUri = stored
+                editMessage = null
+            } else {
+                editMessage = "사진을 불러오지 못했어요."
+            }
+        }
+    }
 
     selectedEntry?.let { entry ->
         AlertDialog(
@@ -1194,8 +1357,22 @@ fun CalendarScreen(entries: List<DiaryEntry>, onDeleteEntry: (DiaryEntry) -> Uni
                 }
             },
             confirmButton = {
-                TextButton(onClick = { selectedEntry = null }) {
-                    Text("닫기")
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = {
+                        coroutineScope.launch {
+                            shareDiaryEntry(context, entry).onFailure {
+                                editMessage = "공유 카드를 만들지 못했어요."
+                            }
+                        }
+                    }) { Text("공유") }
+                    TextButton(onClick = {
+                        editText = entry.text
+                        editPhotoUri = entry.photoUri
+                        editMessage = null
+                        editingEntry = entry
+                        selectedEntry = null
+                    }) { Text("수정") }
+                    TextButton(onClick = { selectedEntry = null }) { Text("닫기") }
                 }
             },
             dismissButton = {
@@ -1209,7 +1386,66 @@ fun CalendarScreen(entries: List<DiaryEntry>, onDeleteEntry: (DiaryEntry) -> Uni
         )
     }
 
+    editingEntry?.let { entry ->
+        AlertDialog(
+            onDismissRequest = {
+                if (editPhotoUri != entry.photoUri) deleteOwnedEntryPhoto(context, editPhotoUri)
+                editingEntry = null
+            },
+            title = { Text("기록 수정") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = editText,
+                        onValueChange = { editText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("기록 문장") },
+                        minLines = 4,
+                        maxLines = 8,
+                        shape = RoundedCornerShape(20.dp)
+                    )
+                    editPhotoUri?.let { PhotoPreview(it, Modifier.height(160.dp)) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { editPhotoPicker.launch(arrayOf("image/*")) }) {
+                            Text(if (editPhotoUri == null) "사진 추가" else "사진 변경")
+                        }
+                        if (editPhotoUri != null) {
+                            TextButton(onClick = {
+                                if (editPhotoUri != entry.photoUri) deleteOwnedEntryPhoto(context, editPhotoUri)
+                                editPhotoUri = null
+                            }) { Text("사진 삭제") }
+                        }
+                    }
+                    editMessage?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = editText.isNotBlank(),
+                    onClick = {
+                        onUpdateEntry(
+                            entry.copy(
+                                text = polishDiaryText(editText),
+                                photoUri = editPhotoUri
+                            )
+                        )
+                        editingEntry = null
+                    }
+                ) { Text("저장") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    if (editPhotoUri != entry.photoUri) deleteOwnedEntryPhoto(context, editPhotoUri)
+                    editingEntry = null
+                }) { Text("취소") }
+            }
+        )
+    }
+
     AppScreen("달력", "조각이 남은 날은 은은하게 표시돼요.") {
+        WeeklyPieceSummary(selectedDate, entries)
         WhitePanel {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1271,6 +1507,91 @@ fun CalendarScreen(entries: List<DiaryEntry>, onDeleteEntry: (DiaryEntry) -> Uni
     }
 }
 
+@Composable
+fun WeeklyPieceSummary(anchorDate: LocalDate, entries: List<DiaryEntry>) {
+    val monday = anchorDate.minusDays((anchorDate.dayOfWeek.value - 1).toLong())
+    val days = (0L..6L).map(monday::plusDays)
+    val byDate = entries.groupBy { it.date }
+    val recordedDays = days.count { byDate[it.format(DateFormatter)].orEmpty().isNotEmpty() }
+    val photoCount = days.sumOf { day ->
+        byDate[day.format(DateFormatter)].orEmpty().count { it.photoUri != null }
+    }
+    val shortDate = DateTimeFormatter.ofPattern("M.d")
+
+    WhitePanel {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text("주간 조각 모음", fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                Text(
+                    "${monday.format(shortDate)} - ${monday.plusDays(6).format(shortDate)}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp
+                )
+            }
+            Text(
+                "${recordedDays}일",
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            days.forEach { day ->
+                val hasEntry = byDate[day.format(DateFormatter)].orEmpty().isNotEmpty()
+                val isSelected = day == anchorDate
+                Column(
+                    modifier = Modifier.weight(1f),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        listOf("월", "화", "수", "목", "금", "토", "일")[day.dayOfWeek.value - 1],
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                when {
+                                    isSelected && hasEntry -> Coral
+                                    isSelected -> PeachSoft
+                                    hasEntry -> Mint
+                                    else -> MaterialTheme.colorScheme.background
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (hasEntry) {
+                            Box(
+                                Modifier
+                                    .size(14.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (isSelected) Color.White else Coral.copy(alpha = 0.72f))
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Text(
+            if (recordedDays == 0) "이번 주의 첫 조각을 기다리고 있어요."
+            else "이번 주에는 ${recordedDays}일의 하루를 남겼어요." +
+                if (photoCount > 0) " 사진도 ${photoCount}장 함께 있어요." else "",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
+            lineHeight = 20.sp
+        )
+    }
+}
 @Composable
 fun CalendarGrid(month: YearMonth, byDate: Map<String, List<DiaryEntry>>, selectedDate: LocalDate, onSelect: (LocalDate) -> Unit) {
     val first = month.atDay(1)
@@ -1436,13 +1757,20 @@ fun SearchTextField(value: String, onValueChange: (String) -> Unit) {
 @Composable
 fun SettingsScreen(
     profile: Profile,
+    entries: List<DiaryEntry>,
     themeName: String,
     onSaveProfile: (Profile) -> Unit,
+    onRestoreData: (RestoredDiaryData) -> Unit,
     onThemeChange: (String) -> Unit,
+    onLockChanged: (Boolean) -> Unit,
     onMoveCalendar: () -> Unit
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var section by remember { mutableStateOf("menu") }
+    var backupMessage by remember { mutableStateOf<String?>(null) }
+    var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+    var restoreRunning by remember { mutableStateOf(false) }
     val currentTime = remember { currentReminderTimeParts() }
     var period by remember { mutableStateOf(currentTime.first) }
     var hour by remember { mutableStateOf(currentTime.second) }
@@ -1459,6 +1787,62 @@ fun SettingsScreen(
         mutableStateListOf<String>().also { list ->
             list.addAll(profile.topics)
         }
+    }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri != null) {
+            backupMessage = "백업 파일을 만들고 있어요."
+            coroutineScope.launch {
+                exportDiaryBackup(context, uri, profile, entries, themeName)
+                    .onSuccess { backupMessage = "백업 파일을 저장했어요." }
+                    .onFailure { backupMessage = "백업 파일을 만들지 못했어요." }
+            }
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        pendingRestoreUri = uri
+    }
+
+    pendingRestoreUri?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { if (!restoreRunning) pendingRestoreUri = null },
+            title = { Text("백업에서 복원할까요?") },
+            text = {
+                Text(
+                    "현재 프로필과 기록을 백업 파일의 내용으로 바꿔요. 먼저 현재 기록을 백업해두는 것을 권장해요.",
+                    lineHeight = 22.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !restoreRunning,
+                    onClick = {
+                        restoreRunning = true
+                        backupMessage = "백업 내용을 확인하고 있어요."
+                        coroutineScope.launch {
+                            importDiaryBackup(context, uri)
+                                .onSuccess {
+                                    onRestoreData(it)
+                                    backupMessage = "${it.entries.size}개의 기록을 복원했어요."
+                                    pendingRestoreUri = null
+                                }
+                                .onFailure {
+                                    backupMessage = it.message ?: "백업 파일을 복원하지 못했어요."
+                                    pendingRestoreUri = null
+                                }
+                            restoreRunning = false
+                        }
+                    }
+                ) { Text(if (restoreRunning) "복원 중" else "복원") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !restoreRunning,
+                    onClick = { pendingRestoreUri = null }
+                ) { Text("취소") }
+            }
+        )
     }
 
     when (section) {
@@ -1516,16 +1900,50 @@ fun SettingsScreen(
             onSaveProfile(profile.copy(topics = selectedTopics, topicDetails = selectedDetails))
             section = "menu"
         }
+        "backup" -> AppScreen("백업과 복원", "기록과 사진을 한 파일로 보관해요.") {
+            WhitePanel {
+                TextButton(onClick = { section = "menu" }) { Text("설정으로") }
+                Text(
+                    "백업 파일에는 프로필, 기록 문장, 사진이 함께 들어가요. 잠금 번호는 포함하지 않아요.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                    lineHeight = 21.sp
+                )
+                PrimaryButton("백업 파일 만들기") {
+                    exportLauncher.launch(backupFileName())
+                }
+                OutlinedSoftButton("백업에서 복원하기") {
+                    importLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+                }
+                backupMessage?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+        }
+        "lock" -> AppLockSettingsScreen(
+            onBack = { section = "menu" },
+            onLockChanged = onLockChanged
+        )
         else -> AppScreen("설정", "${profile.name}님의 하루조각") {
             WhitePanel {
                 SettingRow("알람", "${profile.notifyTimes.size}개의 기록 알림", onClick = { section = "alarm" })
                 SettingRow("분위기", themeName, onClick = { section = "theme" })
                 SettingRow("자주 남기고 싶은 것", topicSummary(profile.topics), onClick = { section = "topics" })
+                SettingRow("백업과 복원", "${entries.size}개의 기록 보관", onClick = { section = "backup" })
+                SettingRow(
+                    "앱 잠금",
+                    if (isAppLockEnabled(context)) "잠금 번호 사용 중" else "사용하지 않음",
+                    onClick = { section = "lock" }
+                )
             }
         }
     }
 }
-
 fun topicSummary(topics: List<String>): String {
     return if (topics.isEmpty()) "아직 선택하지 않음" else topics.joinToString(", ")
 }
@@ -2289,16 +2707,7 @@ fun newEntry(text: String, kind: String, date: LocalDate = LocalDate.now(), phot
 
 fun loadProfile(context: Context): Profile? {
     val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString("profile", null) ?: return null
-    val json = JSONObject(raw)
-    val topicsJson = json.optJSONArray("topics") ?: JSONArray()
-    val timesJson = json.optJSONArray("notifyTimes") ?: JSONArray()
-    return Profile(
-        name = json.optString("name"),
-        gender = json.optString("gender"),
-        age = json.optString("age"),
-        notifyTimes = List(timesJson.length()) { timesJson.optString(it) }.ifEmpty { listOf(json.optString("notifyTime", "22:00")) }.map(::normalizeReminderText).distinct(),
-        topics = List(topicsJson.length()) { topicsJson.optString(it) }
-    )
+    return runCatching { profileFromJson(JSONObject(raw)) }.getOrNull()
 }
 
 fun loadTheme(context: Context): String {
@@ -2317,30 +2726,23 @@ fun clearHaruPieceTestData(context: Context) {
 }
 
 fun saveProfile(context: Context, profile: Profile) {
-    val json = JSONObject()
-        .put("name", profile.name)
-        .put("gender", profile.gender)
-        .put("age", profile.age)
-        .put("notifyTimes", JSONArray(profile.notifyTimes))
-        .put("topics", JSONArray(profile.topics))
-    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("profile", json.toString()).apply()
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit().putString("profile", profileToJson(profile).toString()).apply()
 }
 
 fun loadEntries(context: Context): List<DiaryEntry> {
     val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString("entries", "[]") ?: "[]"
-    val array = JSONArray(raw)
-    return List(array.length()) { index ->
-        val json = array.getJSONObject(index)
-        DiaryEntry(json.optString("date"), json.optString("time"), json.optString("text"), json.optString("kind", "normal"), json.optString("photoUri").takeIf { it.isNotBlank() })
-    }
+    return runCatching {
+        val array = JSONArray(raw)
+        List(array.length()) { index -> entryFromJson(array.getJSONObject(index), index) }
+    }.getOrDefault(emptyList())
 }
 
 fun saveEntries(context: Context, entries: List<DiaryEntry>) {
     val array = JSONArray()
-    entries.forEach { entry ->
-        array.put(JSONObject().put("date", entry.date).put("time", entry.time).put("text", entry.text).put("kind", entry.kind).put("photoUri", entry.photoUri ?: ""))
-    }
-    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("entries", array.toString()).apply()
+    entries.forEach { entry -> array.put(entryToJson(entry)) }
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit().putString("entries", array.toString()).apply()
 }
 
 

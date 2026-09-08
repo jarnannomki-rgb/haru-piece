@@ -1,4 +1,4 @@
-﻿package com.example.diaryapp
+package com.example.diaryapp
 
 import android.Manifest
 import android.app.AlarmManager
@@ -16,6 +16,8 @@ import java.util.Calendar
 private const val REMINDER_CHANNEL_ID = "haru_piece_reminders_high"
 private const val REMINDER_REQUEST_BASE = 41000
 private const val MAX_REMINDER_COUNT = 64
+const val ACTION_QUICK_RECORD = "com.example.diaryapp.action.QUICK_RECORD"
+const val EXTRA_QUICK_RECORD = "quick_record"
 
 data class ReminderSpec(
     val raw: String,
@@ -150,7 +152,10 @@ private fun showDiaryReminder(context: Context) {
     val openIntent = PendingIntent.getActivity(
         context,
         0,
-        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        Intent(context, MainActivity::class.java)
+            .setAction(ACTION_QUICK_RECORD)
+            .putExtra(EXTRA_QUICK_RECORD, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
@@ -161,7 +166,7 @@ private fun showDiaryReminder(context: Context) {
         .setContentIntent(openIntent)
         .setAutoCancel(true)
         .setCategory(NotificationCompat.CATEGORY_REMINDER)
-        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         .setDefaults(NotificationCompat.DEFAULT_ALL)
         .setPriority(NotificationCompat.PRIORITY_HIGH)
         .build()

@@ -1,3 +1,5 @@
-﻿<resources>
+<resources>
     <string name="app_name">하루조각</string>
+    <string name="quick_record_short">오늘 기록</string>
+    <string name="quick_record_long">오늘의 조각 바로 기록</string>
 </resources>
