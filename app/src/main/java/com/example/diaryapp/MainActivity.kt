@@ -922,8 +922,9 @@ fun TodayScreen(
     var customAnswerLoading by remember { mutableStateOf(false) }
     val dbQuestions = remember { mutableStateMapOf<Int, Question>() }
     val resolvedQuestions = remember { mutableStateMapOf<Int, Boolean>() }
-    val missedDbRequests = remember { mutableStateListOf<String>() }
     var questionLoading by remember { mutableStateOf(false) }
+    var questionLoadFailed by remember { mutableStateOf(false) }
+    var questionRetryNonce by remember { mutableStateOf(0) }
     var nextGroupKey by remember { mutableStateOf<String?>(null) }
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -950,19 +951,20 @@ fun TodayScreen(
 
     fun cancelQuestionFlow() {
         val prefetchedFirstQuestion = dbQuestions[0]
-        val firstQuestionResolved = resolvedQuestions[0] == true
+
         keyboardController?.hide()
         focusManager.clearFocus()
         answers.clear()
         customInput = ""
         customAnswerLoading = false
+        questionLoading = false
+        questionLoadFailed = false
         dbQuestions.clear()
         resolvedQuestions.clear()
-        if (firstQuestionResolved) {
-            prefetchedFirstQuestion?.let { dbQuestions[0] = it }
+        prefetchedFirstQuestion?.let {
+            dbQuestions[0] = it
             resolvedQuestions[0] = true
         }
-        missedDbRequests.clear()
         nextGroupKey = null
         questionIndex = 0
         mode = "start"
@@ -970,18 +972,18 @@ fun TodayScreen(
 
     fun startQuestionFlow() {
         val prefetchedFirstQuestion = dbQuestions[0]
-        val firstQuestionResolved = resolvedQuestions[0] == true
+
         answers.clear()
         questionIndex = 0
         customInput = ""
         selectedPhotoUri = null
+        questionLoadFailed = false
         dbQuestions.clear()
         resolvedQuestions.clear()
-        if (firstQuestionResolved) {
-            prefetchedFirstQuestion?.let { dbQuestions[0] = it }
+        prefetchedFirstQuestion?.let {
+            dbQuestions[0] = it
             resolvedQuestions[0] = true
         }
-        missedDbRequests.clear()
         nextGroupKey = null
         mode = "question"
     }
@@ -1050,23 +1052,23 @@ fun TodayScreen(
         dbQuestions.remove(0)
         resolvedQuestions.remove(0)
         val prefetched = fetchDbQuestion(context, profile, entries, recordDate, 1, questionLimit, null)
-        if (prefetched != null) dbQuestions[0] = prefetched
-        resolvedQuestions[0] = true
+        if (prefetched != null) {
+            dbQuestions[0] = prefetched
+            resolvedQuestions[0] = true
+        }
     }
 
-    LaunchedEffect(mode, questionIndex, recordDate, nextGroupKey, entries.size) {
+    LaunchedEffect(mode, questionIndex, recordDate, nextGroupKey, entries.size, questionRetryNonce) {
         if (mode == "question" && resolvedQuestions[questionIndex] != true && !questionLoading) {
-            val requestKey = listOf(recordDate.format(DateFormatter), questionIndex.toString(), nextGroupKey ?: "start", entries.size.toString()).joinToString("|")
             questionLoading = true
-            if (!missedDbRequests.contains(requestKey)) {
-                val dbQuestion = fetchDbQuestion(context, profile, entries, recordDate, questionIndex + 1, questionLimit, nextGroupKey)
-                if (dbQuestion != null) {
-                    dbQuestions[questionIndex] = dbQuestion
-                } else {
-                    missedDbRequests.add(requestKey)
-                }
+            questionLoadFailed = false
+            val dbQuestion = fetchDbQuestion(context, profile, entries, recordDate, questionIndex + 1, questionLimit, nextGroupKey)
+            if (dbQuestion != null) {
+                dbQuestions[questionIndex] = dbQuestion
+                resolvedQuestions[questionIndex] = true
+            } else {
+                questionLoadFailed = true
             }
-            resolvedQuestions[questionIndex] = true
             questionLoading = false
         }
     }
@@ -1165,8 +1167,22 @@ TestDatePicker(recordDate, { recordDate = it })
                 Text("${questionIndex + 1} / $questionLimit", color = CoralDark, fontWeight = FontWeight.Bold)
                 val question = currentQuestion
                 if (question == null) {
-                    Text("질문을 준비하고 있어요", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
-                    Text("잠시만 기다려주세요.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (questionLoadFailed) {
+                        Text("질문을 불러오지 못했어요", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
+                        Text("연결을 확인한 뒤 다시 시도해주세요.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        PrimaryButton("다시 불러오기") {
+                            questionLoadFailed = false
+                            resolvedQuestions.remove(questionIndex)
+                            questionRetryNonce += 1
+                        }
+                        OutlinedSoftButton("오프라인 질문 사용") {
+                            questionLoadFailed = false
+                            resolvedQuestions[questionIndex] = true
+                        }
+                    } else {
+                        Text("질문을 준비하고 있어요", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
+                        Text("잠시만 기다려주세요.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 } else {
                     Text(question.title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 32.sp)
                     question.options.forEach { option ->

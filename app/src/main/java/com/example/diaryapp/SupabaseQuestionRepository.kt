@@ -3,6 +3,7 @@ package com.example.diaryapp
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
@@ -17,6 +18,8 @@ import kotlin.math.abs
 
 private const val QUESTION_DB_LOG_TAG = "HaruQuestionDb"
 private const val QUESTION_CACHE_NAME = "haru_question_cache"
+private const val QUESTION_FETCH_TIMEOUT_MS = 15_000L
+private const val QUESTION_FETCH_RETRY_DELAY_MS = 700L
 private val questionCacheMutex = Mutex()
 
 private val allStartTopics = listOf(
@@ -36,7 +39,7 @@ suspend fun fetchDbQuestion(
     step: Int,
     questionLimit: Int,
     groupKey: String?
-): Question? = withTimeoutOrNull(5_000) {
+): Question? = withTimeoutOrNull(QUESTION_FETCH_TIMEOUT_MS) {
     withContext(Dispatchers.IO) {
         val targetGroupKey = groupKey?.takeIf { it.isNotBlank() } ?: "start"
         val seed = questionSeed(profile, recordDate, entries.size, step, questionLimit, targetGroupKey)
@@ -44,28 +47,41 @@ suspend fun fetchDbQuestion(
         val cacheKey = questionCacheKey(recordDate, entries.size, step, questionLimit, targetGroupKey, category, profile.topics, seed)
 
         loadCachedQuestion(context, cacheKey) ?: questionCacheMutex.withLock {
-            loadCachedQuestion(context, cacheKey) ?: runCatching {
-                val candidateCount = candidateCount(targetGroupKey)
-                val questions = fetchQuestionCandidates(
-                    groupKey = targetGroupKey,
-                    category = category,
-                    offset = Math.floorMod(seed, candidateCount)
-                )
-                val recordedDays = entries.map { it.date }.toSet().size
-                val candidates = questions
-                    .filter { it.minRecordDays <= recordedDays }
-                    .filter { it.maxRecordDays == null || it.maxRecordDays >= recordedDays }
-                    .mapNotNull { it.question.takeIf { question -> question.options.size >= 4 } }
-                if (candidates.isEmpty()) return@runCatching null
-
-                candidates.first().also { question ->
-                    saveCachedQuestion(context, cacheKey, question)
-                }
-            }.onFailure {
-                Log.w(QUESTION_DB_LOG_TAG, "DB question fetch failed", it)
-            }.getOrNull()
+            loadCachedQuestion(context, cacheKey) ?: fetchQuestionWithRetry(
+                groupKey = targetGroupKey,
+                category = category,
+                seed = seed,
+                recordedDays = entries.map { it.date }.toSet().size
+            )?.also { question ->
+                saveCachedQuestion(context, cacheKey, question)
+            }
         }
     }
+}
+
+private suspend fun fetchQuestionWithRetry(
+    groupKey: String,
+    category: String?,
+    seed: Int,
+    recordedDays: Int
+): Question? {
+    repeat(2) { attempt ->
+        val question = runCatching {
+            val candidates = fetchQuestionCandidates(groupKey, category)
+                .filter { it.minRecordDays <= recordedDays }
+                .filter { it.maxRecordDays == null || it.maxRecordDays >= recordedDays }
+                .mapNotNull { it.question.takeIf { question -> question.options.size >= 4 } }
+            candidates
+                .takeIf { it.isNotEmpty() }
+                ?.get(Math.floorMod(seed, candidates.size))
+        }.onFailure {
+            Log.w(QUESTION_DB_LOG_TAG, "DB question fetch failed (attempt ${attempt + 1})", it)
+        }.getOrNull()
+
+        if (question != null) return question
+        if (attempt == 0) delay(QUESTION_FETCH_RETRY_DELAY_MS)
+    }
+    return null
 }
 
 suspend fun prefetchDbNextQuestions(
@@ -179,7 +195,7 @@ private data class QuestionCandidate(
     val maxRecordDays: Int?
 )
 
-private fun fetchQuestionCandidates(groupKey: String, category: String?, offset: Int): List<QuestionCandidate> {
+private fun fetchQuestionCandidates(groupKey: String, category: String?): List<QuestionCandidate> {
     val select = questionSelect()
     val filters = buildList {
         add("select=$select")
@@ -188,8 +204,7 @@ private fun fetchQuestionCandidates(groupKey: String, category: String?, offset:
         category?.let { add("category=eq.${it.urlEncode()}") }
         add("order=question_key.asc")
         add("question_options.order=option_order.asc")
-        add("offset=$offset")
-        add("limit=1")
+        add("limit=${candidateCount(groupKey)}")
     }.joinToString("&")
     val rows = supabaseGetArray("questions?$filters")
     return List(rows.length()) { index -> rows.getJSONObject(index) }
