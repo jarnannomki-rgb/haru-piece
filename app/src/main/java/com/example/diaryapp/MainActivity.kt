@@ -9,9 +9,11 @@ import android.net.Uri
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -202,6 +204,7 @@ fun colorSchemeFor(theme: String) = when (theme) {
 class MainActivity : FragmentActivity() {
     private val quickRecordRequested = mutableStateOf(false)
     private val weeklyRecapRequested = mutableStateOf(false)
+    internal var externalPickerActive = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -294,7 +297,7 @@ fun HaruPieceApp(
     onWeeklyRecapConsumed: () -> Unit
 ) {
     val context = LocalContext.current
-    val activity = context as FragmentActivity
+    val activity = context as MainActivity
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
     var profile by remember { mutableStateOf(loadProfile(context)) }
@@ -348,10 +351,15 @@ fun HaruPieceApp(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP -> backgroundedAt = System.currentTimeMillis()
+                Lifecycle.Event.ON_STOP -> {
+                    if (!activity.externalPickerActive) {
+                        backgroundedAt = System.currentTimeMillis()
+                    }
+                }
                 Lifecycle.Event.ON_START -> {
                     val leftAt = backgroundedAt
                     if (
+                        !activity.externalPickerActive &&
                         leftAt != null &&
                         System.currentTimeMillis() - leftAt >= 30_000L &&
                         isAppLockEnabled(context)
@@ -910,6 +918,7 @@ fun TodayScreen(
     onMoveCalendar: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = context as MainActivity
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
@@ -932,7 +941,8 @@ fun TodayScreen(
     var questionLoadFailed by remember { mutableStateOf(false) }
     var questionRetryNonce by remember { mutableStateOf(0) }
     var nextGroupKey by remember { mutableStateOf<String?>(null) }
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        activity.externalPickerActive = false
         if (uri != null) {
             val pickerMode = mode
             val previousPhoto = selectedPhotoUri
@@ -1261,7 +1271,13 @@ TestDatePicker(recordDate, { recordDate = it })
                     },
                     enabled = !photoLoading
                 ) {
-                    photoPicker.launch(arrayOf("image/*"))
+                    activity.externalPickerActive = true
+                    runCatching {
+                        photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }.onFailure {
+                        activity.externalPickerActive = false
+                        photoMessage = "사진 선택 화면을 열지 못했어요."
+                    }
                 }
                 photoMessage?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
@@ -1417,6 +1433,7 @@ fun CalendarScreen(
     onDeleteEntry: (DiaryEntry) -> Unit
 ) {
     val context = LocalContext.current
+    val activity = context as MainActivity
     val coroutineScope = rememberCoroutineScope()
     var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
@@ -1428,7 +1445,8 @@ fun CalendarScreen(
     var editMessage by remember { mutableStateOf<String?>(null) }
     val selectedKey = selectedDate.format(DateFormatter)
     val byDate = entries.groupBy { it.date }
-    val editPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val editPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        activity.externalPickerActive = false
         val targetEntry = editingEntry
         if (uri != null && targetEntry != null) {
             val previousPhoto = editPhotoUri
@@ -1515,7 +1533,15 @@ fun CalendarScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(
                             enabled = !editPhotoLoading,
-                            onClick = { editPhotoPicker.launch(arrayOf("image/*")) }
+                            onClick = {
+                                activity.externalPickerActive = true
+                                runCatching {
+                                    editPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                }.onFailure {
+                                    activity.externalPickerActive = false
+                                    editMessage = "사진 선택 화면을 열지 못했어요."
+                                }
+                            }
                         ) {
                             Text(
                                 when {
@@ -2318,15 +2344,20 @@ fun PhotoPreview(uri: String, modifier: Modifier = Modifier) {
             }
         },
         update = { imageView ->
-            runCatching {
-                val parsed = Uri.parse(uri)
-                if (parsed.scheme.isNullOrBlank()) {
-                    imageView.setImageURI(Uri.fromFile(File(uri)))
-                } else {
-                    imageView.setImageURI(parsed)
+            if (imageView.tag != uri) {
+                runCatching {
+                    imageView.setImageDrawable(null)
+                    val parsed = Uri.parse(uri)
+                    if (parsed.scheme.isNullOrBlank()) {
+                        imageView.setImageURI(Uri.fromFile(File(uri)))
+                    } else {
+                        imageView.setImageURI(parsed)
+                    }
+                    imageView.tag = uri
+                }.onFailure {
+                    imageView.setImageDrawable(null)
+                    imageView.tag = null
                 }
-            }.onFailure {
-                imageView.setImageDrawable(null)
             }
         }
     )
@@ -2773,13 +2804,8 @@ suspend fun savePhotoToAppStorage(context: Context, sourceUri: Uri): String? =
                 return@runCatching null
             }
 
-            val options = BitmapFactory.Options().apply {
-                inSampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, 1600)
-                inScaled = false
-            }
-            val bitmap = context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                BitmapFactory.decodeStream(input, null, options)
-            } ?: return@runCatching null
+            val bitmap = decodeScaledPhoto(context, sourceUri, bounds.outWidth, bounds.outHeight, 1280)
+                ?: return@runCatching null
 
             val photosDir = File(context.filesDir, "entry_photos").apply { mkdirs() }
             val output = File(photosDir, "${UUID.randomUUID()}.jpg")
@@ -2797,6 +2823,33 @@ suspend fun savePhotoToAppStorage(context: Context, sourceUri: Uri): String? =
             }
         }.getOrNull()
     }
+
+fun decodeScaledPhoto(context: Context, sourceUri: Uri, width: Int, height: Int, maxSize: Int): Bitmap? {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val source = ImageDecoder.createSource(context.contentResolver, sourceUri)
+        return ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+            val (targetWidth, targetHeight) = calculateScaledImageDimensions(width, height, maxSize)
+            decoder.setTargetSize(targetWidth, targetHeight)
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+        }
+    }
+
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = calculateImageSampleSize(width, height, maxSize)
+        inPreferredConfig = Bitmap.Config.RGB_565
+        inScaled = false
+    }
+    return context.contentResolver.openInputStream(sourceUri)?.use { input ->
+        BitmapFactory.decodeStream(input, null, options)
+    }
+}
+
+fun calculateScaledImageDimensions(width: Int, height: Int, maxSize: Int): Pair<Int, Int> {
+    if (width <= 0 || height <= 0 || maxSize <= 0) return 1 to 1
+    val scale = minOf(1f, maxSize.toFloat() / maxOf(width, height).toFloat())
+    return maxOf(1, (width * scale).toInt()) to maxOf(1, (height * scale).toInt())
+}
 
 fun calculateImageSampleSize(width: Int, height: Int, maxSize: Int): Int {
     if (width <= 0 || height <= 0) return 1

@@ -16,4 +16,14 @@ class PhotoProcessingTest {
         assertEquals(1, calculateImageSampleSize(0, 0, 1600))
         assertEquals(1, calculateImageSampleSize(-1, -1, 1600))
     }
+
+    @Test
+    fun largeLandscapeIsScaledWithinLimit() {
+        assertEquals(1280 to 853, calculateScaledImageDimensions(6000, 4000, 1280))
+    }
+
+    @Test
+    fun smallPhotoKeepsOriginalDimensions() {
+        assertEquals(800 to 600, calculateScaledImageDimensions(800, 600, 1280))
+    }
 }
