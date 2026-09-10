@@ -9,11 +9,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -24,11 +26,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
@@ -48,15 +52,49 @@ fun WeeklyRecapScreen(
         days.lastOrNull { entriesByDate[it.format(DateFormatter)].orEmpty().isNotEmpty() } ?: anchorDate
     }
     var selectedDate by remember { mutableStateOf(initialDate) }
+    var showIntro by remember { mutableStateOf(true) }
+    val introAlpha = remember { Animatable(0f) }
     val assembleProgress = remember { Animatable(0f) }
     val shortDate = remember { DateTimeFormatter.ofPattern("M.d") }
     val dayNames = listOf("월", "화", "수", "목", "금", "토", "일")
 
     LaunchedEffect(monday) {
-        assembleProgress.snapTo(0f)
-        assembleProgress.animateTo(7f, animationSpec = tween(durationMillis = 2_300))
+        showIntro = true
+        introAlpha.snapTo(0f)
+        introAlpha.animateTo(1f, animationSpec = tween(durationMillis = 350))
+        delay(650)
+        introAlpha.animateTo(0f, animationSpec = tween(durationMillis = 350))
+        showIntro = false
+    }
+    LaunchedEffect(showIntro, monday) {
+        if (!showIntro) {
+            assembleProgress.snapTo(0f)
+            assembleProgress.animateTo(7f, animationSpec = tween(durationMillis = 1_600))
+        }
     }
     BackHandler(onBack = onClose)
+
+    if (showIntro) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable { showIntro = false },
+            color = Color.White
+        ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    "하루의 조각이 쌓여\n한 주의 이야기가 되었어요.",
+                    modifier = Modifier.graphicsLayer { alpha = introAlpha.value },
+                    color = Color(0xFF2F2525),
+                    fontSize = 27.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 39.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+        return
+    }
 
     AppScreen(
         title = "이번 주의 조각",

@@ -192,7 +192,7 @@ fun AppLockSettingsScreen(onBack: () -> Unit, onLockChanged: (Boolean) -> Unit) 
                 if (enabled) {
                     "앱을 다시 열 때 휴대폰에 등록된 인증을 요청해요."
                 } else {
-                    "별도의 4자리 번호를 만들지 않아도 돼요."
+                    "휴대폰 잠금으로 하루조각을 보호해요."
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 lineHeight = 22.sp

@@ -81,4 +81,46 @@ class DiarySentenceEngineTest {
         assertFalse(DiarySentenceEngine.looksSuspicious("없었어", question))
         assertTrue(DiarySentenceEngine.looksSuspicious("자 ㅁ 작", question))
     }
+
+    @Test
+    fun groqResultRunsBeforeLocalTypoFallback() {
+        val question = Question("오늘 무엇을 했나요?", emptyList())
+
+        assertFalse(
+            shouldReviewCustomAnswer(
+                PolishedSentence("오늘은 잠을 잤다.", needsReview = false),
+                "자 ㅁ 작",
+                question
+            )
+        )
+        assertTrue(shouldReviewCustomAnswer(null, "자 ㅁ 작", question))
+        assertTrue(
+            shouldReviewCustomAnswer(
+                PolishedSentence("", needsReview = true),
+                "잠자기",
+                question
+            )
+        )
+    }
+
+    @Test
+    fun diaryDisplaySeparatesAnswersWithoutChangingStoredText() {
+        val answers = listOf(
+            "오늘은 취미 활동을 조금 했다.",
+            "오늘 여유 시간에는 무언가를 만들거나 배웠다."
+        )
+
+        assertEquals(
+            "오늘은 취미 활동을 조금 했다.\n\n오늘 여유 시간에는 무언가를 만들거나 배웠다.",
+            makeDiaryDisplayText(answers)
+        )
+        assertEquals(
+            "오늘은 취미 활동을 조금 했다. 오늘 여유 시간에는 무언가를 만들거나 배웠다.",
+            makeDiaryText(answers)
+        )
+        assertEquals(
+            makeDiaryDisplayText(answers),
+            formatDiaryTextForDisplay(makeDiaryText(answers))
+        )
+    }
 }

@@ -813,7 +813,9 @@ fun NotificationScreen(notifyTimes: MutableList<String>, onComplete: () -> Unit)
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(normalizeReminderText(reminder), color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold)
-                    Text("알림", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    TextButton(onClick = { notifyTimes.remove(reminder) }) {
+                        Text("삭제", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), fontSize = 12.sp)
+                    }
                 }
             }
         }
@@ -945,7 +947,7 @@ fun TodayScreen(
     }
 
     fun finishNormally(nextAnswers: List<String>) {
-        draft = makeDiaryText(nextAnswers)
+        draft = makeDiaryDisplayText(nextAnswers)
         mode = "review"
     }
 
@@ -1005,10 +1007,6 @@ fun TodayScreen(
         val input = customInput.trim()
         if (input.isBlank()) return
         val question = currentQuestion ?: return
-        if (DiarySentenceEngine.looksSuspicious(input, question)) {
-            showCustomInputWarning = true
-            return
-        }
         val localDraft = sentenceFromCustomAnswer(input, question)
         val submittedQuestionIndex = questionIndex
         customAnswerLoading = true
@@ -1018,7 +1016,7 @@ fun TodayScreen(
             val polished = polishCustomDiarySentence(question.title, input, localDraft)
             customAnswerLoading = false
             if (mode != "question" || questionIndex != submittedQuestionIndex) return@launch
-            if (polished?.needsReview == true) {
+            if (shouldReviewCustomAnswer(polished, input, question)) {
                 showCustomInputWarning = true
                 return@launch
             }
@@ -1250,7 +1248,7 @@ TestDatePicker(recordDate, { recordDate = it })
             }
             "done" -> WhitePanel {
                 CompletionContent(
-                    sentence = polishDiaryText(draft),
+                    sentence = formatDiaryTextForDisplay(completedEntry?.text ?: polishDiaryText(draft)),
                     onShare = completedEntry?.let { entry ->
                         { coroutineScope.launch { shareDiaryEntry(context, entry) } }
                     },
@@ -2028,7 +2026,18 @@ fun RepeatSelector(selectedDays: MutableList<String>) {
     if (expanded) {
         AlertDialog(
             onDismissRequest = { expanded = false },
-            title = { Text("반복") },
+            shape = RoundedCornerShape(18.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            title = {
+                Text(
+                    "반복",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     ReminderDayOptions.forEach { day ->
@@ -2036,6 +2045,13 @@ fun RepeatSelector(selectedDays: MutableList<String>) {
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(14.dp))
+                                .background(
+                                    if (day in selectedDays) {
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                    } else {
+                                        Color.Transparent
+                                    }
+                                )
                                 .clickable {
                                     val next = toggleReminderDay(selectedDays, day)
                                     selectedDays.clear()
@@ -2054,7 +2070,9 @@ fun RepeatSelector(selectedDays: MutableList<String>) {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { expanded = false }) { Text("완료") }
+                TextButton(onClick = { expanded = false }) {
+                    Text("완료", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                }
             }
         )
     }
@@ -2661,6 +2679,24 @@ fun polishDiaryText(raw: String): String = DiarySentenceEngine.polish(raw)
 fun sentenceFromCustomAnswer(answer: String, question: Question): String = DiarySentenceEngine.fromCustomAnswer(answer, question)
 
 fun makeDiaryText(answers: List<String>): String = DiarySentenceEngine.combine(answers)
+
+fun makeDiaryDisplayText(answers: List<String>): String {
+    val cleaned = answers
+        .map(DiarySentenceEngine::polish)
+        .filter(String::isNotBlank)
+    return if (cleaned.isEmpty()) {
+        "오늘은 아무것도 남기지 않은 하루였다."
+    } else {
+        cleaned.joinToString("\n\n")
+    }
+}
+
+fun formatDiaryTextForDisplay(raw: String): String = raw
+    .trim()
+    .split(Regex("(?<=[.!?])\\s+"))
+    .filter(String::isNotBlank)
+    .joinToString("\n\n")
+
 fun String.ensurePeriod(): String {
     val value = trim()
     return if (value.endsWith(".") || value.endsWith("!") || value.endsWith("?")) value else "$value."

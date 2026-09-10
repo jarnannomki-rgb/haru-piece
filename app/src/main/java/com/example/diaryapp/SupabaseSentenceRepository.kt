@@ -16,6 +16,12 @@ data class PolishedSentence(
 private const val SENTENCE_API_LOG_TAG = "HaruSentenceApi"
 private const val SENTENCE_FUNCTION_NAME = "polish-diary-sentence"
 
+internal fun shouldReviewCustomAnswer(
+    polished: PolishedSentence?,
+    rawAnswer: String,
+    question: Question
+): Boolean = polished?.needsReview ?: DiarySentenceEngine.looksSuspicious(rawAnswer, question)
+
 suspend fun polishCustomDiarySentence(
     question: String,
     answer: String,
