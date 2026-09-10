@@ -100,9 +100,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
@@ -918,6 +920,8 @@ fun TodayScreen(
     var draft by remember { mutableStateOf("") }
     var recordDate by remember { mutableStateOf(LocalDate.now()) }
     var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
+    var photoLoading by remember { mutableStateOf(false) }
+    var photoMessage by remember { mutableStateOf<String?>(null) }
     var completedEntry by remember { mutableStateOf<DiaryEntry?>(null) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var showCustomInputWarning by remember { mutableStateOf(false) }
@@ -930,7 +934,24 @@ fun TodayScreen(
     var nextGroupKey by remember { mutableStateOf<String?>(null) }
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            selectedPhotoUri = savePhotoToAppStorage(context, uri) ?: uri.toString()
+            val pickerMode = mode
+            val previousPhoto = selectedPhotoUri
+            photoLoading = true
+            photoMessage = null
+            coroutineScope.launch {
+                val stored = savePhotoToAppStorage(context, uri)
+                photoLoading = false
+                if (mode != pickerMode) {
+                    deleteOwnedEntryPhoto(context, stored)
+                    return@launch
+                }
+                if (stored != null) {
+                    deleteOwnedEntryPhoto(context, previousPhoto)
+                    selectedPhotoUri = stored
+                } else {
+                    photoMessage = "사진을 불러오지 못했어요. 다른 사진으로 다시 시도해주세요."
+                }
+            }
         }
     }
     val questionLimit = when {
@@ -979,6 +1000,7 @@ fun TodayScreen(
         questionIndex = 0
         customInput = ""
         selectedPhotoUri = null
+        photoMessage = null
         questionLoadFailed = false
         dbQuestions.clear()
         resolvedQuestions.clear()
@@ -1231,13 +1253,23 @@ TestDatePicker(recordDate, { recordDate = it })
                         focusManager.clearFocus()
                     })
                 )
-                OutlinedSoftButton(if (selectedPhotoUri == null) "사진 추가" else "사진 바꾸기") {
+                OutlinedSoftButton(
+                    text = when {
+                        photoLoading -> "사진 불러오는 중..."
+                        selectedPhotoUri == null -> "사진 추가"
+                        else -> "사진 바꾸기"
+                    },
+                    enabled = !photoLoading
+                ) {
                     photoPicker.launch(arrayOf("image/*"))
+                }
+                photoMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
                 }
                 selectedPhotoUri?.let { uri ->
                     PhotoPreview(uri, Modifier.height(150.dp))
                 }
-                PrimaryButton("확인", enabled = draft.isNotBlank()) {
+                PrimaryButton("확인", enabled = draft.isNotBlank() && !photoLoading) {
                     keyboardController?.hide()
                     focusManager.clearFocus()
                     val entry = newEntry(polishDiaryText(draft), "normal", recordDate, selectedPhotoUri)
@@ -1392,17 +1424,31 @@ fun CalendarScreen(
     var editingEntry by remember { mutableStateOf<DiaryEntry?>(null) }
     var editText by remember { mutableStateOf("") }
     var editPhotoUri by remember { mutableStateOf<String?>(null) }
+    var editPhotoLoading by remember { mutableStateOf(false) }
     var editMessage by remember { mutableStateOf<String?>(null) }
     val selectedKey = selectedDate.format(DateFormatter)
     val byDate = entries.groupBy { it.date }
     val editPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            val stored = savePhotoToAppStorage(context, uri)
-            if (stored != null) {
-                editPhotoUri = stored
-                editMessage = null
-            } else {
-                editMessage = "사진을 불러오지 못했어요."
+        val targetEntry = editingEntry
+        if (uri != null && targetEntry != null) {
+            val previousPhoto = editPhotoUri
+            editPhotoLoading = true
+            editMessage = null
+            coroutineScope.launch {
+                val stored = savePhotoToAppStorage(context, uri)
+                editPhotoLoading = false
+                if (editingEntry != targetEntry) {
+                    deleteOwnedEntryPhoto(context, stored)
+                    return@launch
+                }
+                if (stored != null) {
+                    if (previousPhoto != targetEntry.photoUri) {
+                        deleteOwnedEntryPhoto(context, previousPhoto)
+                    }
+                    editPhotoUri = stored
+                } else {
+                    editMessage = "사진을 불러오지 못했어요. 다른 사진으로 다시 시도해주세요."
+                }
             }
         }
     }
@@ -1467,8 +1513,17 @@ fun CalendarScreen(
                     )
                     editPhotoUri?.let { PhotoPreview(it, Modifier.height(160.dp)) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { editPhotoPicker.launch(arrayOf("image/*")) }) {
-                            Text(if (editPhotoUri == null) "사진 추가" else "사진 변경")
+                        TextButton(
+                            enabled = !editPhotoLoading,
+                            onClick = { editPhotoPicker.launch(arrayOf("image/*")) }
+                        ) {
+                            Text(
+                                when {
+                                    editPhotoLoading -> "사진 불러오는 중..."
+                                    editPhotoUri == null -> "사진 추가"
+                                    else -> "사진 변경"
+                                }
+                            )
                         }
                         if (editPhotoUri != null) {
                             TextButton(onClick = {
@@ -1484,7 +1539,7 @@ fun CalendarScreen(
             },
             confirmButton = {
                 TextButton(
-                    enabled = editText.isNotBlank(),
+                    enabled = editText.isNotBlank() && !editPhotoLoading,
                     onClick = {
                         onUpdateEntry(
                             entry.copy(
@@ -2263,11 +2318,15 @@ fun PhotoPreview(uri: String, modifier: Modifier = Modifier) {
             }
         },
         update = { imageView ->
-            val parsed = Uri.parse(uri)
-            if (parsed.scheme.isNullOrBlank()) {
-                imageView.setImageURI(Uri.fromFile(File(uri)))
-            } else {
-                imageView.setImageURI(parsed)
+            runCatching {
+                val parsed = Uri.parse(uri)
+                if (parsed.scheme.isNullOrBlank()) {
+                    imageView.setImageURI(Uri.fromFile(File(uri)))
+                } else {
+                    imageView.setImageURI(parsed)
+                }
+            }.onFailure {
+                imageView.setImageDrawable(null)
             }
         }
     )
@@ -2702,24 +2761,42 @@ fun String.ensurePeriod(): String {
     return if (value.endsWith(".") || value.endsWith("!") || value.endsWith("?")) value else "$value."
 }
 
-fun savePhotoToAppStorage(context: Context, sourceUri: Uri): String? {
-    return runCatching {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        context.contentResolver.openInputStream(sourceUri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+suspend fun savePhotoToAppStorage(context: Context, sourceUri: Uri): String? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            val boundsRead = context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                BitmapFactory.decodeStream(input, null, bounds)
+                true
+            } ?: false
+            if (!boundsRead || bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return@runCatching null
+            }
 
-        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, 1600)
-        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        val bitmap = context.contentResolver.openInputStream(sourceUri)?.use { BitmapFactory.decodeStream(it, null, options) } ?: return@runCatching null
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, 1600)
+                inScaled = false
+            }
+            val bitmap = context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                BitmapFactory.decodeStream(input, null, options)
+            } ?: return@runCatching null
 
-        val photosDir = File(context.filesDir, "entry_photos").apply { mkdirs() }
-        val output = File(photosDir, "${UUID.randomUUID()}.jpg")
-        FileOutputStream(output).use { stream ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 84, stream)
-        }
-        bitmap.recycle()
-        output.absolutePath
-    }.getOrNull()
-}
+            val photosDir = File(context.filesDir, "entry_photos").apply { mkdirs() }
+            val output = File(photosDir, "${UUID.randomUUID()}.jpg")
+            try {
+                val saved = FileOutputStream(output).use { stream ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 84, stream)
+                }
+                if (!saved) {
+                    output.delete()
+                    return@runCatching null
+                }
+                output.absolutePath
+            } finally {
+                bitmap.recycle()
+            }
+        }.getOrNull()
+    }
 
 fun calculateImageSampleSize(width: Int, height: Int, maxSize: Int): Int {
     if (width <= 0 || height <= 0) return 1
