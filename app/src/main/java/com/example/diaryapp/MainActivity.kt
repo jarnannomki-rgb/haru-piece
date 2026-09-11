@@ -89,7 +89,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
@@ -941,7 +941,7 @@ fun TodayScreen(
     var questionLoadFailed by remember { mutableStateOf(false) }
     var questionRetryNonce by remember { mutableStateOf(0) }
     var nextGroupKey by remember { mutableStateOf<String?>(null) }
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+    val handlePhotoResult: (Uri?) -> Unit = { uri ->
         activity.externalPickerActive = false
         if (uri != null) {
             val pickerMode = mode
@@ -964,6 +964,14 @@ fun TodayScreen(
             }
         }
     }
+    val fallbackPhotoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+        handlePhotoResult
+    )
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+        handlePhotoResult
+    )
     val questionLimit = when {
         entries.size >= 10 -> 4
         entries.size >= 6 -> 3
@@ -1275,8 +1283,11 @@ TestDatePicker(recordDate, { recordDate = it })
                     runCatching {
                         photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     }.onFailure {
-                        activity.externalPickerActive = false
-                        photoMessage = "사진 선택 화면을 열지 못했어요."
+                        runCatching { fallbackPhotoPicker.launch("image/*") }
+                            .onFailure {
+                                activity.externalPickerActive = false
+                                photoMessage = "사진 선택 화면을 열지 못했어요."
+                            }
                     }
                 }
                 photoMessage?.let {
@@ -1445,7 +1456,7 @@ fun CalendarScreen(
     var editMessage by remember { mutableStateOf<String?>(null) }
     val selectedKey = selectedDate.format(DateFormatter)
     val byDate = entries.groupBy { it.date }
-    val editPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+    val handleEditPhotoResult: (Uri?) -> Unit = { uri ->
         activity.externalPickerActive = false
         val targetEntry = editingEntry
         if (uri != null && targetEntry != null) {
@@ -1470,6 +1481,14 @@ fun CalendarScreen(
             }
         }
     }
+    val fallbackEditPhotoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+        handleEditPhotoResult
+    )
+    val editPhotoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+        handleEditPhotoResult
+    )
 
     selectedEntry?.let { entry ->
         AlertDialog(
@@ -1538,8 +1557,11 @@ fun CalendarScreen(
                                 runCatching {
                                     editPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                                 }.onFailure {
-                                    activity.externalPickerActive = false
-                                    editMessage = "사진 선택 화면을 열지 못했어요."
+                                    runCatching { fallbackEditPhotoPicker.launch("image/*") }
+                                        .onFailure {
+                                            activity.externalPickerActive = false
+                                            editMessage = "사진 선택 화면을 열지 못했어요."
+                                        }
                                 }
                             }
                         ) {

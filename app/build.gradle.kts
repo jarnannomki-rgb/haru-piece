@@ -6,13 +6,13 @@ plugins {
 android {
     namespace = "com.example.diaryapp"
     compileSdk {
-        version = release(35)
+        version = release(37)
     }
 
     defaultConfig {
         applicationId = "com.example.diaryapp"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0"
 
@@ -59,6 +59,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation("androidx.biometric:biometric:1.1.0")
     testImplementation(libs.junit)
     testImplementation("org.json:json:20240303")
