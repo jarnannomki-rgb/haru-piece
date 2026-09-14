@@ -19,7 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.activity.compose.LocalActivity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -151,7 +151,7 @@ fun AppLockScreen(activity: FragmentActivity, onUnlocked: () -> Unit) {
 
 @Composable
 fun AppLockSettingsScreen(onBack: () -> Unit, onLockChanged: (Boolean) -> Unit) {
-    val activity = LocalContext.current as FragmentActivity
+    val activity = LocalActivity.current as FragmentActivity
     var enabled by remember { mutableStateOf(isAppLockEnabled(activity)) }
     var message by remember { mutableStateOf<String?>(null) }
     var isError by remember { mutableStateOf(false) }
