@@ -931,6 +931,7 @@ fun TodayScreen(
     var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
     var photoLoading by remember { mutableStateOf(false) }
     var photoMessage by remember { mutableStateOf<String?>(null) }
+    var photoPickerDiagnostic by remember { mutableStateOf<String?>(null) }
     var completedEntry by remember { mutableStateOf<DiaryEntry?>(null) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var showCustomInputWarning by remember { mutableStateOf(false) }
@@ -972,6 +973,16 @@ fun TodayScreen(
         ActivityResultContracts.PickVisualMedia(),
         handlePhotoResult
     )
+    photoPickerDiagnostic?.let { diagnostic ->
+        AlertDialog(
+            onDismissRequest = { photoPickerDiagnostic = null },
+            title = { Text("사진 선택 오류") },
+            text = { Text(diagnostic, lineHeight = 20.sp) },
+            confirmButton = {
+                TextButton(onClick = { photoPickerDiagnostic = null }) { Text("확인") }
+            }
+        )
+    }
     val questionLimit = when {
         entries.size >= 10 -> 4
         entries.size >= 6 -> 3
@@ -1282,11 +1293,16 @@ TestDatePicker(recordDate, { recordDate = it })
                     activity.externalPickerActive = true
                     runCatching {
                         photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    }.onFailure {
+                    }.onFailure { primaryError ->
                         runCatching { fallbackPhotoPicker.launch("image/*") }
-                            .onFailure {
+                            .onFailure { fallbackError ->
                                 activity.externalPickerActive = false
                                 photoMessage = "사진 선택 화면을 열지 못했어요."
+                                photoPickerDiagnostic = buildPhotoPickerDiagnostic(
+                                    context,
+                                    primaryError,
+                                    fallbackError
+                                )
                             }
                     }
                 }
@@ -1454,6 +1470,7 @@ fun CalendarScreen(
     var editPhotoUri by remember { mutableStateOf<String?>(null) }
     var editPhotoLoading by remember { mutableStateOf(false) }
     var editMessage by remember { mutableStateOf<String?>(null) }
+    var editPhotoPickerDiagnostic by remember { mutableStateOf<String?>(null) }
     val selectedKey = selectedDate.format(DateFormatter)
     val byDate = entries.groupBy { it.date }
     val handleEditPhotoResult: (Uri?) -> Unit = { uri ->
@@ -1489,6 +1506,16 @@ fun CalendarScreen(
         ActivityResultContracts.PickVisualMedia(),
         handleEditPhotoResult
     )
+    editPhotoPickerDiagnostic?.let { diagnostic ->
+        AlertDialog(
+            onDismissRequest = { editPhotoPickerDiagnostic = null },
+            title = { Text("사진 선택 오류") },
+            text = { Text(diagnostic, lineHeight = 20.sp) },
+            confirmButton = {
+                TextButton(onClick = { editPhotoPickerDiagnostic = null }) { Text("확인") }
+            }
+        )
+    }
 
     selectedEntry?.let { entry ->
         AlertDialog(
@@ -1556,11 +1583,16 @@ fun CalendarScreen(
                                 activity.externalPickerActive = true
                                 runCatching {
                                     editPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                                }.onFailure {
+                                }.onFailure { primaryError ->
                                     runCatching { fallbackEditPhotoPicker.launch("image/*") }
-                                        .onFailure {
+                                        .onFailure { fallbackError ->
                                             activity.externalPickerActive = false
                                             editMessage = "사진 선택 화면을 열지 못했어요."
+                                            editPhotoPickerDiagnostic = buildPhotoPickerDiagnostic(
+                                                context,
+                                                primaryError,
+                                                fallbackError
+                                            )
                                         }
                                 }
                             }
@@ -2865,6 +2897,24 @@ fun decodeScaledPhoto(context: Context, sourceUri: Uri, width: Int, height: Int,
     return context.contentResolver.openInputStream(sourceUri)?.use { input ->
         BitmapFactory.decodeStream(input, null, options)
     }
+}
+
+fun buildPhotoPickerDiagnostic(context: Context, primaryError: Throwable, fallbackError: Throwable): String {
+    fun Throwable.brief(): String {
+        val detail = message.orEmpty().replace(Regex("\\s+"), " ").trim().take(140)
+        return if (detail.isBlank()) javaClass.simpleName else "${javaClass.simpleName}: $detail"
+    }
+
+    val pickerAvailable = runCatching {
+        ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)
+    }.getOrDefault(false)
+    return listOf(
+        "기기: ${Build.MANUFACTURER} ${Build.MODEL}",
+        "Android: ${Build.VERSION.RELEASE} / API ${Build.VERSION.SDK_INT} / 대상 ${context.applicationInfo.targetSdkVersion}",
+        "Photo Picker 지원: $pickerAvailable",
+        "기본 선택기: ${primaryError.brief()}",
+        "대체 선택기: ${fallbackError.brief()}"
+    ).joinToString("\n")
 }
 
 fun calculateScaledImageDimensions(width: Int, height: Int, maxSize: Int): Pair<Int, Int> {
