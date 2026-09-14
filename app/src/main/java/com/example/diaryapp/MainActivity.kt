@@ -7,6 +7,7 @@ import android.os.Build
 import android.widget.ImageView
 import android.net.Uri
 import android.content.Intent
+import android.speech.RecognizerIntent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -56,6 +57,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -88,6 +91,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -345,7 +349,10 @@ fun HaruPieceApp(
     }
 
     LaunchedEffect(profile?.notifyTimes) {
-        profile?.let { scheduleDiaryReminders(context, it.notifyTimes) }
+        profile?.let {
+            scheduleDiaryReminders(context, it.notifyTimes)
+            scheduleWeeklyRecap(context)
+        }
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -926,6 +933,7 @@ fun TodayScreen(
     var questionIndex by remember { mutableStateOf(0) }
     val answers = remember { mutableStateListOf<String>() }
     var customInput by remember { mutableStateOf("") }
+    var voiceInputMessage by remember { mutableStateOf<String?>(null) }
     var draft by remember { mutableStateOf("") }
     var recordDate by remember { mutableStateOf(LocalDate.now()) }
     var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
@@ -973,6 +981,41 @@ fun TodayScreen(
         ActivityResultContracts.PickVisualMedia(),
         handlePhotoResult
     )
+    val voiceInputLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        activity.externalPickerActive = false
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val spokenText = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+            if (spokenText.isNullOrBlank()) {
+                voiceInputMessage = "음성을 인식하지 못했어요. 다시 말해주세요."
+            } else {
+                customInput = listOf(customInput.trim(), spokenText)
+                    .filter(String::isNotBlank)
+                    .joinToString(" ")
+                voiceInputMessage = null
+            }
+        }
+    }
+
+    fun startVoiceInput() {
+        voiceInputMessage = null
+        activity.externalPickerActive = true
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "기억을 말해주세요")
+        }
+        runCatching { voiceInputLauncher.launch(intent) }
+            .onFailure {
+                activity.externalPickerActive = false
+                voiceInputMessage = "이 휴대폰에서 음성 입력을 시작하지 못했어요."
+            }
+    }
     photoPickerDiagnostic?.let { diagnostic ->
         AlertDialog(
             onDismissRequest = { photoPickerDiagnostic = null },
@@ -1008,6 +1051,7 @@ fun TodayScreen(
         focusManager.clearFocus()
         answers.clear()
         customInput = ""
+        voiceInputMessage = null
         customAnswerLoading = false
         questionLoading = false
         questionLoadFailed = false
@@ -1028,6 +1072,7 @@ fun TodayScreen(
         answers.clear()
         questionIndex = 0
         customInput = ""
+        voiceInputMessage = null
         selectedPhotoUri = null
         photoMessage = null
         questionLoadFailed = false
@@ -1049,6 +1094,7 @@ fun TodayScreen(
             finishNormally(answers.toList())
         } else {
             customInput = ""
+            voiceInputMessage = null
             questionIndex += 1
         }
     }
@@ -1075,6 +1121,7 @@ fun TodayScreen(
             answers.add(polished?.sentence ?: localDraft)
             nextGroupKey = question.defaultNextGroupKey
             customInput = ""
+            voiceInputMessage = null
             if (questionIndex + 1 >= questionLimit) {
                 finishNormally(answers.toList())
             } else {
@@ -1239,12 +1286,30 @@ TestDatePicker(recordDate, { recordDate = it })
                     }
                     HaruTextField(
                         value = customInput,
-                        onValueChange = { customInput = it },
+                        onValueChange = {
+                            customInput = it
+                            voiceInputMessage = null
+                        },
                         label = "기타(입력)",
                         enabled = !customAnswerLoading,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { submitCustomAnswer() })
+                        keyboardActions = KeyboardActions(onDone = { submitCustomAnswer() }),
+                        trailingIcon = {
+                            IconButton(
+                                enabled = !customAnswerLoading,
+                                onClick = ::startVoiceInput
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_mic),
+                                    contentDescription = "음성으로 입력",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     )
+                    voiceInputMessage?.let { message ->
+                        Text(message, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                    }
                     PrimaryButton(
                         if (customAnswerLoading) "문장 다듬는 중..." else "기타로 남기기",
                         enabled = customInput.isNotBlank() && !customAnswerLoading
@@ -2451,7 +2516,8 @@ fun HaruTextField(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
-    keyboardActions: KeyboardActions = KeyboardActions()
+    keyboardActions: KeyboardActions = KeyboardActions(),
+    trailingIcon: @Composable (() -> Unit)? = null
 ) {
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     val coroutineScope = rememberCoroutineScope()
@@ -2474,6 +2540,7 @@ fun HaruTextField(
             },
         keyboardOptions = keyboardOptions,
         keyboardActions = keyboardActions,
+        trailingIcon = trailingIcon,
         shape = RoundedCornerShape(22.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = MaterialTheme.colorScheme.primary,

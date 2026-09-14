@@ -251,8 +251,8 @@ private fun JSONObject.toQuestionCandidate(): QuestionCandidate? {
             if (label.isBlank() || sentence.isBlank()) null else AnswerOption(
                 label = label,
                 sentence = polishDiaryText(sentence),
-                nextGroupKey = row.optString("next_group_key").ifBlank { null },
-                value = row.optString("answer_value").ifBlank { null }
+                nextGroupKey = row.nullableString("next_group_key"),
+                value = row.nullableString("answer_value")
             )
         }
 
@@ -265,7 +265,7 @@ private fun JSONObject.toQuestionCandidate(): QuestionCandidate? {
             groupKey = groupKey,
             depthLevel = optInt("depth_level", 1),
             customAnswerType = optString("custom_answer_type").ifBlank { "activity" },
-            defaultNextGroupKey = optString("default_next_group_key").ifBlank { null },
+            defaultNextGroupKey = nullableString("default_next_group_key"),
             cooldownDays = optInt("cooldown_days", 3),
             weight = optInt("weight", 100)
         ),
@@ -341,8 +341,8 @@ private fun JSONObject.toCachedQuestion(): Question? {
         if (label.isBlank() || sentence.isBlank()) null else AnswerOption(
             label = label,
             sentence = sentence,
-            nextGroupKey = row.optString("nextGroupKey").ifBlank { null },
-            value = row.optString("value").ifBlank { null }
+            nextGroupKey = row.nullableString("nextGroupKey"),
+            value = row.nullableString("value")
         )
     }
     if (options.size < 4) return null
@@ -354,7 +354,7 @@ private fun JSONObject.toCachedQuestion(): Question? {
         groupKey = optString("groupKey"),
         depthLevel = optInt("depthLevel", 1),
         customAnswerType = optString("customAnswerType", "activity"),
-        defaultNextGroupKey = optString("defaultNextGroupKey").ifBlank { null },
+        defaultNextGroupKey = nullableString("defaultNextGroupKey"),
         cooldownDays = optInt("cooldownDays", 3),
         weight = optInt("weight", 100)
     )
@@ -381,6 +381,11 @@ private fun supabaseGetArray(pathAndQuery: String): JSONArray {
         return JSONArray()
     }
     return JSONArray(responseText.ifBlank { "[]" })
+}
+
+internal fun JSONObject.nullableString(name: String): String? {
+    if (isNull(name)) return null
+    return optString(name).trim().takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
 }
 
 private fun String.urlEncode(): String = URLEncoder.encode(this, "UTF-8")

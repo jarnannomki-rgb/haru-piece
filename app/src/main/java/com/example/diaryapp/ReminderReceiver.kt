@@ -15,7 +15,9 @@ import java.util.Calendar
 
 private const val REMINDER_CHANNEL_ID = "haru_piece_reminders_high"
 private const val REMINDER_REQUEST_BASE = 41000
-private const val WEEKLY_RECAP_REQUEST = 41999
+private const val WEEKLY_RECAP_SCHEDULE_REQUEST = 41998
+private const val WEEKLY_RECAP_TEST_REQUEST = 41999
+private const val WEEKLY_RECAP_OPEN_REQUEST = 42001
 private const val WEEKLY_RECAP_NOTIFICATION_ID = 42000
 private const val ACTION_WEEKLY_RECAP_ALARM = "com.example.diaryapp.action.WEEKLY_RECAP_ALARM"
 private const val MAX_REMINDER_COUNT = 64
@@ -34,11 +36,15 @@ data class ReminderSpec(
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            loadProfile(context)?.let { scheduleDiaryReminders(context, it.notifyTimes) }
+            loadProfile(context)?.let { profile ->
+                scheduleDiaryReminders(context, profile.notifyTimes)
+                scheduleWeeklyRecap(context)
+            }
             return
         }
         if (intent.action == ACTION_WEEKLY_RECAP_ALARM) {
             showWeeklyRecapNotification(context)
+            if (intent.getBooleanExtra("recurring", false)) scheduleWeeklyRecap(context)
             return
         }
 
@@ -81,13 +87,32 @@ fun scheduleWeeklyRecapTest(context: Context) {
     val intent = Intent(context, ReminderReceiver::class.java).setAction(ACTION_WEEKLY_RECAP_ALARM)
     val pendingIntent = PendingIntent.getBroadcast(
         context,
-        WEEKLY_RECAP_REQUEST,
+        WEEKLY_RECAP_TEST_REQUEST,
         intent,
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
     alarmManager.cancel(pendingIntent)
     scheduleAlarm(alarmManager, System.currentTimeMillis() + 60_000L, pendingIntent)
 }
+
+fun scheduleWeeklyRecap(context: Context) {
+    ensureReminderChannel(context)
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val intent = Intent(context, ReminderReceiver::class.java)
+        .setAction(ACTION_WEEKLY_RECAP_ALARM)
+        .putExtra("recurring", true)
+    val pendingIntent = PendingIntent.getBroadcast(
+        context,
+        WEEKLY_RECAP_SCHEDULE_REQUEST,
+        intent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    alarmManager.cancel(pendingIntent)
+    scheduleAlarm(alarmManager, nextWeeklyRecapMillis(), pendingIntent)
+}
+
+internal fun nextWeeklyRecapMillis(now: Calendar = Calendar.getInstance()): Long =
+    nextReminderMillis(ReminderSpec("weekly", "일", 20, 30), now)
 
 private fun scheduleAlarm(alarmManager: AlarmManager, triggerAt: Long, pendingIntent: PendingIntent) {
     if (Build.VERSION.SDK_INT < 31 || alarmManager.canScheduleExactAlarms()) {
@@ -202,7 +227,7 @@ private fun showWeeklyRecapNotification(context: Context) {
     ensureReminderChannel(context)
     val openIntent = PendingIntent.getActivity(
         context,
-        WEEKLY_RECAP_REQUEST,
+        WEEKLY_RECAP_OPEN_REQUEST,
         Intent(context, MainActivity::class.java)
             .setAction(ACTION_WEEKLY_RECAP)
             .putExtra(EXTRA_WEEKLY_RECAP, true)

@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 
 class QuestionSelectionTest {
     @Test
@@ -30,5 +31,13 @@ class QuestionSelectionTest {
         val selected = (0 until 100).map { seed -> chooseStartCategory(listOf("알 수 없음"), seed) }
 
         assertFalse(selected.any { it in forbidden })
+    }
+    @Test
+    fun databaseNullDoesNotBecomeLiteralNullGroupKey() {
+        val databaseNull = JSONObject().put("next_group_key", JSONObject.NULL)
+        val staleCachedNull = JSONObject().put("next_group_key", "null")
+
+        assertEquals(null, databaseNull.nullableString("next_group_key"))
+        assertEquals(null, staleCachedNull.nullableString("next_group_key"))
     }
 }
