@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -79,6 +80,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -96,14 +98,17 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
@@ -935,6 +940,7 @@ fun TodayScreen(
     var customInput by remember { mutableStateOf("") }
     var voiceInputMessage by remember { mutableStateOf<String?>(null) }
     var draft by remember { mutableStateOf("") }
+    var draftVoiceInputMessage by remember { mutableStateOf<String?>(null) }
     var recordDate by remember { mutableStateOf(LocalDate.now()) }
     var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
     var photoLoading by remember { mutableStateOf(false) }
@@ -981,41 +987,22 @@ fun TodayScreen(
         ActivityResultContracts.PickVisualMedia(),
         handlePhotoResult
     )
-    val voiceInputLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        activity.externalPickerActive = false
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val spokenText = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-                ?.trim()
-            if (spokenText.isNullOrBlank()) {
-                voiceInputMessage = "음성을 인식하지 못했어요. 다시 말해주세요."
-            } else {
-                customInput = listOf(customInput.trim(), spokenText)
-                    .filter(String::isNotBlank)
-                    .joinToString(" ")
-                voiceInputMessage = null
-            }
-        }
-    }
-
-    fun startVoiceInput() {
-        voiceInputMessage = null
-        activity.externalPickerActive = true
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "기억을 말해주세요")
-        }
-        runCatching { voiceInputLauncher.launch(intent) }
-            .onFailure {
-                activity.externalPickerActive = false
-                voiceInputMessage = "이 휴대폰에서 음성 입력을 시작하지 못했어요."
-            }
-    }
+    val startCustomVoiceInput = rememberKoreanVoiceInput(
+        activity = activity,
+        onRecognized = { spokenText ->
+            customInput = appendRecognizedText(customInput, spokenText)
+            voiceInputMessage = null
+        },
+        onError = { voiceInputMessage = it }
+    )
+    val startDraftVoiceInput = rememberKoreanVoiceInput(
+        activity = activity,
+        onRecognized = { spokenText ->
+            draft = appendRecognizedText(draft, spokenText)
+            draftVoiceInputMessage = null
+        },
+        onError = { draftVoiceInputMessage = it }
+    )
     photoPickerDiagnostic?.let { diagnostic ->
         AlertDialog(
             onDismissRequest = { photoPickerDiagnostic = null },
@@ -1295,16 +1282,10 @@ TestDatePicker(recordDate, { recordDate = it })
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(onDone = { submitCustomAnswer() }),
                         trailingIcon = {
-                            IconButton(
+                            VoiceInputButton(
                                 enabled = !customAnswerLoading,
-                                onClick = ::startVoiceInput
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_mic),
-                                    contentDescription = "음성으로 입력",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                                onClick = startCustomVoiceInput
+                            )
                         }
                     )
                     voiceInputMessage?.let { message ->
@@ -1338,15 +1319,24 @@ TestDatePicker(recordDate, { recordDate = it })
                 Text("오늘의 조각", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                 HaruTextField(
                     value = draft,
-                    onValueChange = { draft = it },
+                    onValueChange = {
+                        draft = it
+                        draftVoiceInputMessage = null
+                    },
                     label = "기록 문장",
                     modifier = Modifier.height(150.dp),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = {
                         keyboardController?.hide()
                         focusManager.clearFocus()
-                    })
+                    }),
+                    trailingIcon = {
+                        VoiceInputButton(onClick = startDraftVoiceInput)
+                    }
                 )
+                draftVoiceInputMessage?.let { message ->
+                    Text(message, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                }
                 OutlinedSoftButton(
                     text = when {
                         photoLoading -> "사진 불러오는 중..."
@@ -1527,11 +1517,16 @@ fun CalendarScreen(
     val context = LocalContext.current
     val activity = context as MainActivity
     val coroutineScope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val density = LocalDensity.current
+    val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
     var selectedMonth by remember { mutableStateOf(YearMonth.now()) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
     var selectedEntry by remember { mutableStateOf<DiaryEntry?>(null) }
     var editingEntry by remember { mutableStateOf<DiaryEntry?>(null) }
-    var editText by remember { mutableStateOf("") }
+    var editText by remember { mutableStateOf(TextFieldValue("")) }
+    var editVoiceInputMessage by remember { mutableStateOf<String?>(null) }
     var editPhotoUri by remember { mutableStateOf<String?>(null) }
     var editPhotoLoading by remember { mutableStateOf(false) }
     var editMessage by remember { mutableStateOf<String?>(null) }
@@ -1571,6 +1566,14 @@ fun CalendarScreen(
         ActivityResultContracts.PickVisualMedia(),
         handleEditPhotoResult
     )
+    val startEditVoiceInput = rememberKoreanVoiceInput(
+        activity = activity,
+        onRecognized = { spokenText ->
+            editText = insertRecognizedText(editText, spokenText)
+            editVoiceInputMessage = null
+        },
+        onError = { editVoiceInputMessage = it }
+    )
     editPhotoPickerDiagnostic?.let { diagnostic ->
         AlertDialog(
             onDismissRequest = { editPhotoPickerDiagnostic = null },
@@ -1602,7 +1605,8 @@ fun CalendarScreen(
                         }
                     }) { Text("공유") }
                     TextButton(onClick = {
-                        editText = entry.text
+                        editText = TextFieldValue(entry.text, TextRange(entry.text.length))
+                        editVoiceInputMessage = null
                         editPhotoUri = entry.photoUri
                         editMessage = null
                         editingEntry = entry
@@ -1626,20 +1630,41 @@ fun CalendarScreen(
         AlertDialog(
             onDismissRequest = {
                 if (editPhotoUri != entry.photoUri) deleteOwnedEntryPhoto(context, editPhotoUri)
+                editVoiceInputMessage = null
                 editingEntry = null
             },
             title = { Text("기록 수정") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = if (isKeyboardVisible) 280.dp else 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     OutlinedTextField(
                         value = editText,
-                        onValueChange = { editText = it },
+                        onValueChange = {
+                            editText = it
+                            editVoiceInputMessage = null
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("기록 문장") },
                         minLines = 4,
                         maxLines = 8,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = {
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                        }),
+                        trailingIcon = {
+                            VoiceInputButton(onClick = startEditVoiceInput)
+                        },
                         shape = RoundedCornerShape(20.dp)
                     )
+                    editVoiceInputMessage?.let { message ->
+                        Text(message, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                    }
                     editPhotoUri?.let { PhotoPreview(it, Modifier.height(160.dp)) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(
@@ -1684,14 +1709,17 @@ fun CalendarScreen(
             },
             confirmButton = {
                 TextButton(
-                    enabled = editText.isNotBlank() && !editPhotoLoading,
+                    enabled = editText.text.isNotBlank() && !editPhotoLoading,
                     onClick = {
                         onUpdateEntry(
                             entry.copy(
-                                text = polishDiaryText(editText),
+                                text = polishDiaryText(editText.text),
                                 photoUri = editPhotoUri
                             )
                         )
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
+                        editVoiceInputMessage = null
                         editingEntry = null
                     }
                 ) { Text("저장") }
@@ -1699,9 +1727,13 @@ fun CalendarScreen(
             dismissButton = {
                 TextButton(onClick = {
                     if (editPhotoUri != entry.photoUri) deleteOwnedEntryPhoto(context, editPhotoUri)
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                    editVoiceInputMessage = null
                     editingEntry = null
                 }) { Text("취소") }
-            }
+            },
+            properties = DialogProperties(dismissOnClickOutside = false)
         )
     }
 
@@ -2549,6 +2581,91 @@ fun HaruTextField(
             unfocusedContainerColor = MaterialTheme.colorScheme.surface
         )
     )
+}
+
+internal fun appendRecognizedText(current: String, spoken: String): String {
+    val recognized = spoken.trim()
+    if (recognized.isBlank()) return current
+
+    val existing = current.trimEnd()
+    return if (existing.isBlank()) recognized else "$existing $recognized"
+}
+
+internal fun insertRecognizedText(
+    current: TextFieldValue,
+    spoken: String
+): TextFieldValue {
+    val recognized = spoken.trim()
+    if (recognized.isBlank()) return current
+
+    val selectionStart = minOf(current.selection.start, current.selection.end)
+    val selectionEnd = maxOf(current.selection.start, current.selection.end)
+    val before = current.text.substring(0, selectionStart)
+    val after = current.text.substring(selectionEnd)
+    val leadingSpace = if (before.isNotEmpty() && !before.last().isWhitespace()) " " else ""
+    val trailingSpace = if (after.isNotEmpty() && !after.first().isWhitespace()) " " else ""
+    val inserted = leadingSpace + recognized
+    val updated = before + inserted + trailingSpace + after
+
+    return TextFieldValue(
+        text = updated,
+        selection = TextRange(before.length + inserted.length)
+    )
+}
+
+@Composable
+private fun rememberKoreanVoiceInput(
+    activity: MainActivity,
+    onRecognized: (String) -> Unit,
+    onError: (String) -> Unit
+): () -> Unit {
+    val latestOnRecognized = rememberUpdatedState(onRecognized)
+    val latestOnError = rememberUpdatedState(onError)
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        activity.externalPickerActive = false
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val spokenText = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+            if (spokenText.isNullOrBlank()) {
+                latestOnError.value("음성을 인식하지 못했어요. 다시 말해주세요.")
+            } else {
+                latestOnRecognized.value(spokenText)
+            }
+        }
+    }
+
+    return {
+        activity.externalPickerActive = true
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "기억을 말해주세요")
+        }
+        runCatching { launcher.launch(intent) }
+            .onFailure {
+                activity.externalPickerActive = false
+                latestOnError.value("이 휴대폰에서 음성 입력을 시작하지 못했어요.")
+            }
+    }
+}
+
+@Composable
+private fun VoiceInputButton(
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    IconButton(enabled = enabled, onClick = onClick) {
+        Icon(
+            painter = painterResource(R.drawable.ic_mic),
+            contentDescription = "음성으로 입력",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
 }
 
 @Composable
