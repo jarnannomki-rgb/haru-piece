@@ -16,7 +16,6 @@ import java.util.Calendar
 private const val REMINDER_CHANNEL_ID = "haru_piece_reminders_high"
 private const val REMINDER_REQUEST_BASE = 41000
 private const val WEEKLY_RECAP_SCHEDULE_REQUEST = 41998
-private const val WEEKLY_RECAP_TEST_REQUEST = 41999
 private const val WEEKLY_RECAP_OPEN_REQUEST = 42001
 private const val WEEKLY_RECAP_NOTIFICATION_ID = 42000
 private const val ACTION_WEEKLY_RECAP_ALARM = "com.example.diaryapp.action.WEEKLY_RECAP_ALARM"
@@ -79,20 +78,6 @@ fun scheduleDiaryReminders(context: Context, reminders: List<String>) {
         )
         scheduleAlarm(alarmManager, triggerAt, pendingIntent)
     }
-}
-
-fun scheduleWeeklyRecapTest(context: Context) {
-    ensureReminderChannel(context)
-    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val intent = Intent(context, ReminderReceiver::class.java).setAction(ACTION_WEEKLY_RECAP_ALARM)
-    val pendingIntent = PendingIntent.getBroadcast(
-        context,
-        WEEKLY_RECAP_TEST_REQUEST,
-        intent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-    alarmManager.cancel(pendingIntent)
-    scheduleAlarm(alarmManager, System.currentTimeMillis() + 60_000L, pendingIntent)
 }
 
 fun scheduleWeeklyRecap(context: Context) {

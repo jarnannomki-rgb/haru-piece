@@ -723,6 +723,7 @@ fun ProfileScreen(
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val isAgeValid = isValidProfileAge(age)
 
     OnboardingShell("먼저, 가볍게", "질문을 조금 더 자연스럽게 건네기 위한 기본 정보예요.") {
         HaruTextField(name, onNameChange, "이름")
@@ -742,9 +743,14 @@ fun ProfileScreen(
                 focusManager.clearFocus()
             })
         )
-        PrimaryButton("다음", enabled = name.isNotBlank() && age.isNotBlank(), onClick = onNext)
+        if (age.isNotBlank() && !isAgeValid) {
+            Text("나이는 1세부터 120세까지 입력해주세요.", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+        }
+        PrimaryButton("다음", enabled = name.isNotBlank() && isAgeValid, onClick = onNext)
     }
 }
+
+internal fun isValidProfileAge(age: String): Boolean = age.toIntOrNull()?.let { it in 1..120 } == true
 
 @Composable
 fun TopicScreen(selectedTopics: MutableList<String>, onNext: () -> Unit) {
@@ -1978,7 +1984,6 @@ fun SettingsScreen(
     val coroutineScope = rememberCoroutineScope()
     var section by remember { mutableStateOf("menu") }
     var backupMessage by remember { mutableStateOf<String?>(null) }
-    var weeklyPushMessage by remember { mutableStateOf<String?>(null) }
     var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
     var restoreRunning by remember { mutableStateOf(false) }
     val currentTime = remember { currentReminderTimeParts() }
@@ -2088,19 +2093,7 @@ fun SettingsScreen(
                 OutlinedSoftButton("알림 테스트") { postDiaryReminderNow(context) }
             }
         }
-        "weeklyPush" -> AppScreen("조각 푸쉬", "주간 조각 알림을 실제처럼 확인해요.") {
-            WhitePanel {
-                TextButton(onClick = { section = "menu" }) { Text("설정으로") }
-                Text("버튼을 누르면 1분 뒤 알림이 와요. 알림을 누르면 이번 주의 조각이 열려요.", color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 22.sp)
-                PrimaryButton("조각 푸쉬") {
-                    scheduleWeeklyRecapTest(context)
-                    weeklyPushMessage = "1분 뒤에 알림을 보낼게요."
-                }
-                weeklyPushMessage?.let {
-                    Text(it, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
-                }
-            }
-        }
+
         "theme" -> AppScreen("분위기", "오늘 보기 좋은 화면 톤을 골라주세요.") {
             WhitePanel {
                 TextButton(onClick = { section = "menu" }) { Text("설정으로") }
@@ -2155,7 +2148,6 @@ fun SettingsScreen(
         else -> AppScreen("설정", "${profile.name}님의 하루조각") {
             WhitePanel {
                 SettingRow("알람", "${profile.notifyTimes.size}개의 기록 알림", onClick = { section = "alarm" })
-                SettingRow("조각 푸쉬", "1분 뒤 주간 조각 알림 테스트", onClick = { section = "weeklyPush" })
                 SettingRow("분위기", themeName, onClick = { section = "theme" })
                 SettingRow("자주 남기고 싶은 것", topicSummary(profile.topics), onClick = { section = "topics" })
                 SettingRow("백업과 복원", "${entries.size}개의 기록 보관", onClick = { section = "backup" })
@@ -3151,7 +3143,16 @@ fun loadEntries(context: Context): List<DiaryEntry> {
     return runCatching {
         val array = JSONArray(raw)
         List(array.length()) { index -> entryFromJson(array.getJSONObject(index), index) }
+            .map { entry -> entry.copy(photoUri = resolveTransferredPhotoPath(entry.photoUri, File(context.filesDir, "entry_photos"))) }
     }.getOrDefault(emptyList())
+}
+
+internal fun resolveTransferredPhotoPath(storedPath: String?, photosDir: File): String? {
+    if (storedPath.isNullOrBlank()) return null
+    val original = File(storedPath)
+    if (!original.isAbsolute || original.exists()) return storedPath
+    val transferred = File(photosDir, original.name)
+    return if (transferred.exists()) transferred.absolutePath else storedPath
 }
 
 fun saveEntries(context: Context, entries: List<DiaryEntry>) {
