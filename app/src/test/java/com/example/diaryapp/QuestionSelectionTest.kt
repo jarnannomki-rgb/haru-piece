@@ -40,4 +40,30 @@ class QuestionSelectionTest {
         assertEquals(null, databaseNull.nullableString("next_group_key"))
         assertEquals(null, staleCachedNull.nullableString("next_group_key"))
     }
+
+    @Test
+    fun duplicateEntriesOnOneDayDoNotUnlockFollowUpQuestions() {
+        val entries = List(10) { index -> testEntry("2026.09.17", index) }
+
+        assertEquals(1, distinctRecordedDayCount(entries))
+        assertEquals(1, questionLimitForEntries(entries))
+    }
+
+    @Test
+    fun questionLimitUsesDistinctRecordedDays() {
+        val entries = (1..10).map { day -> testEntry("2026.09.${day.toString().padStart(2, '0')}", day) }
+
+        assertEquals(1, questionLimitForEntries(entries.take(2)))
+        assertEquals(2, questionLimitForEntries(entries.take(3)))
+        assertEquals(3, questionLimitForEntries(entries.take(6)))
+        assertEquals(4, questionLimitForEntries(entries))
+    }
+
+    private fun testEntry(date: String, index: Int) = DiaryEntry(
+        date = date,
+        time = "09:00",
+        text = "기록 $index",
+        kind = "normal",
+        id = "entry-$index"
+    )
 }

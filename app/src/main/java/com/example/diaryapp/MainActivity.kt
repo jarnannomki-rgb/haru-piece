@@ -276,6 +276,17 @@ data class DiaryEntry(
     val id: String = UUID.randomUUID().toString()
 )
 
+internal fun distinctRecordedDayCount(entries: List<DiaryEntry>): Int =
+    entries.map(DiaryEntry::date).filter(String::isNotBlank).toSet().size
+
+internal fun questionLimitForEntries(entries: List<DiaryEntry>): Int =
+    when (distinctRecordedDayCount(entries)) {
+        in 10..Int.MAX_VALUE -> 4
+        in 6..9 -> 3
+        in 3..5 -> 2
+        else -> 1
+    }
+
 data class AnswerOption(
     val label: String,
     val sentence: String,
@@ -326,7 +337,7 @@ fun HaruPieceApp(
     val followUpTopics = remember(profile?.topics) { mutableStateListOf<String>().also { it.addAll(profile?.topics.orEmpty()) } }
     val pendingDetailTopic = profile?.topics?.firstOrNull { profile?.topicDetails?.get(it).isNullOrEmpty() }
     val detailSelections = remember(pendingDetailTopic) { mutableStateListOf<String>() }
-    val recordedDays = entries.map { it.date }.toSet().size
+    val recordedDays = distinctRecordedDayCount(entries)
     val completedDetailCount = profile?.topicDetails?.count { it.value.isNotEmpty() } ?: 0
     val nextDetailDay = 3 + completedDetailCount * 2
     val canShowTopicPrompt = profile != null && launchDone && recordedDays >= 3 && recordedDays >= profile!!.topicPromptDismissedDay + 2
@@ -334,14 +345,9 @@ fun HaruPieceApp(
     val shouldShowTopicDetailFollowUp = canShowTopicPrompt && profile!!.topics.isNotEmpty() && pendingDetailTopic != null && recordedDays >= nextDetailDay
     val shouldShowTopicExpansionFollowUp = canShowTopicPrompt && profile!!.topics.size in 1..2 && pendingDetailTopic == null
 
-    LaunchedEffect(profile, entries.size) {
+    LaunchedEffect(profile, recordedDays) {
         val savedProfile = profile ?: return@LaunchedEffect
-        val questionLimit = when {
-            entries.size >= 10 -> 4
-            entries.size >= 6 -> 3
-            entries.size >= 3 -> 2
-            else -> 1
-        }
+        val questionLimit = questionLimitForEntries(entries)
         fetchDbQuestion(
             context = context,
             profile = savedProfile,
@@ -1013,12 +1019,8 @@ fun TodayScreen(
             }
         )
     }
-    val questionLimit = when {
-        entries.size >= 10 -> 4
-        entries.size >= 6 -> 3
-        entries.size >= 3 -> 2
-        else -> 1
-    }
+    val recordedDayCount = distinctRecordedDayCount(entries)
+    val questionLimit = questionLimitForEntries(entries)
     val localQuestions = buildQuestions(profile, questionLimit, recordDate, entries, answers.toList())
     val currentQuestion = if (resolvedQuestions[questionIndex] == true) {
         dbQuestions[questionIndex] ?: localQuestions[questionIndex]
@@ -1126,7 +1128,7 @@ fun TodayScreen(
 
     val firstQuestionRequestKey = listOf(
         recordDate.toString(),
-        entries.size.toString(),
+        recordedDayCount.toString(),
         questionLimit.toString(),
         profile.topics.sorted().joinToString("|")
     ).joinToString("|")
@@ -1141,7 +1143,7 @@ fun TodayScreen(
         }
     }
 
-    LaunchedEffect(mode, questionIndex, recordDate, nextGroupKey, entries.size, questionRetryNonce) {
+    LaunchedEffect(mode, questionIndex, recordDate, nextGroupKey, recordedDayCount, questionRetryNonce) {
         if (mode == "question" && resolvedQuestions[questionIndex] != true && !questionLoading) {
             questionLoading = true
             questionLoadFailed = false
@@ -1155,7 +1157,7 @@ fun TodayScreen(
             questionLoading = false
         }
     }
-    LaunchedEffect(mode, questionIndex, currentQuestion?.key, recordDate, entries.size, questionLimit) {
+    LaunchedEffect(mode, questionIndex, currentQuestion?.key, recordDate, recordedDayCount, questionLimit) {
         val question = currentQuestion
         if (mode == "question" && question != null && questionIndex + 1 < questionLimit) {
             val nextGroups = question.options.mapNotNull { option ->
@@ -1172,7 +1174,7 @@ fun TodayScreen(
             )
         }
     }
-    LaunchedEffect(mode, questionIndex, customInput.isNotBlank(), currentQuestion?.key, recordDate, entries.size, questionLimit) {
+    LaunchedEffect(mode, questionIndex, customInput.isNotBlank(), currentQuestion?.key, recordDate, recordedDayCount, questionLimit) {
         val question = currentQuestion
         if (
             mode == "question" &&

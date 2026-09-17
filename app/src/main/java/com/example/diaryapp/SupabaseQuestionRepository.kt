@@ -42,16 +42,17 @@ suspend fun fetchDbQuestion(
 ): Question? = withTimeoutOrNull(QUESTION_FETCH_TIMEOUT_MS) {
     withContext(Dispatchers.IO) {
         val targetGroupKey = groupKey?.takeIf { it.isNotBlank() } ?: "start"
-        val seed = questionSeed(profile, recordDate, entries.size, step, questionLimit, targetGroupKey)
+        val recordedDays = distinctRecordedDayCount(entries)
+        val seed = questionSeed(profile, recordDate, recordedDays, step, questionLimit, targetGroupKey)
         val category = if (targetGroupKey == "start") chooseStartCategory(profile.topics, seed) else null
-        val cacheKey = questionCacheKey(recordDate, entries.size, step, questionLimit, targetGroupKey, category, profile.topics, seed)
+        val cacheKey = questionCacheKey(recordDate, recordedDays, step, questionLimit, targetGroupKey, category, profile.topics, seed)
 
         loadCachedQuestion(context, cacheKey) ?: questionCacheMutex.withLock {
             loadCachedQuestion(context, cacheKey) ?: fetchQuestionWithRetry(
                 groupKey = targetGroupKey,
                 category = category,
                 seed = seed,
-                recordedDays = entries.map { it.date }.toSet().size
+                recordedDays = recordedDays
             )?.also { question ->
                 saveCachedQuestion(context, cacheKey, question)
             }
@@ -95,17 +96,18 @@ suspend fun prefetchDbNextQuestions(
 ) {
     withTimeoutOrNull(5_000) {
         withContext(Dispatchers.IO) {
+            val recordedDays = distinctRecordedDayCount(entries)
             val targets = groupKeys
                 .filter { it.isNotBlank() && it != "start" }
                 .distinct()
                 .map { groupKey ->
-                    val seed = questionSeed(profile, recordDate, entries.size, step, questionLimit, groupKey)
+                    val seed = questionSeed(profile, recordDate, recordedDays, step, questionLimit, groupKey)
                     PrefetchTarget(
                         groupKey = groupKey,
                         seed = seed,
                         cacheKey = questionCacheKey(
                             recordDate,
-                            entries.size,
+                            recordedDays,
                             step,
                             questionLimit,
                             groupKey,
@@ -124,7 +126,6 @@ suspend fun prefetchDbNextQuestions(
                 if (pending.isEmpty()) return@withLock
 
                 runCatching {
-                    val recordedDays = entries.map { it.date }.toSet().size
                     val candidatesByGroup = fetchQuestionCandidatesForGroups(pending.map { it.groupKey })
                         .filter { it.minRecordDays <= recordedDays }
                         .filter { it.maxRecordDays == null || it.maxRecordDays >= recordedDays }
@@ -169,7 +170,7 @@ internal fun chooseStartCategory(selectedTopics: List<String>, seed: Int): Strin
 private fun questionSeed(
     profile: Profile,
     recordDate: LocalDate,
-    entryCount: Int,
+    recordedDays: Int,
     step: Int,
     questionLimit: Int,
     groupKey: String
@@ -181,7 +182,7 @@ private fun questionSeed(
         profile.age,
         profile.topics.sorted().joinToString("|"),
         recordDate.toString(),
-        entryCount.toString(),
+        recordedDays.toString(),
         step.toString(),
         questionLimit.toString(),
         groupKey
@@ -276,7 +277,7 @@ private fun JSONObject.toQuestionCandidate(): QuestionCandidate? {
 
 private fun questionCacheKey(
     recordDate: LocalDate,
-    entryCount: Int,
+    recordedDays: Int,
     step: Int,
     questionLimit: Int,
     groupKey: String,
@@ -286,7 +287,7 @@ private fun questionCacheKey(
 ): String = listOf(
     "question",
     recordDate.toString(),
-    entryCount.toString(),
+    recordedDays.toString(),
     step.toString(),
     questionLimit.toString(),
     groupKey,
